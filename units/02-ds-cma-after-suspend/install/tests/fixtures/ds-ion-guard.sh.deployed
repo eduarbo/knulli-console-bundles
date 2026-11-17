@@ -1,0 +1,18 @@
+#!/bin/sh
+# Knulli user script (gameStart hook): before a DS game starts, check that the ION/CMA
+# buffer advanced_drastic needs can still be allocated. After some long suspends the
+# kernel refuses it and every DS game fails with "could not find entry in file" until a
+# reboot; this turns that silent failure into a clear notice in the menu.
+# Installed as /userdata/system/scripts/ds-ion-guard.sh with ion_check.py in
+# /userdata/system/ds-guard/. Called by emulatorlauncher as: <event> <system> <emulator> ...
+[ "$1" = gameStart ] && [ "$2" = nds ] || exit 0
+CHECK=${DS_GUARD_CHECK:-/userdata/system/ds-guard/ion_check.py}
+LOG=/var/log/ds-ion-guard.log
+result=$(timeout 5 python3 "$CHECK" 2>&1)
+status=$?
+echo "$(date -u +%FT%TZ) status=$status $result" >>"$LOG"
+[ "$status" = 0 ] && exit 0
+curl -s -m 2 http://localhost:1234/notify \
+    -d "DS: falta memoria de video tras una suspensión larga. Reinicia la consola para jugar DS." \
+    >/dev/null 2>&1
+exit 0

@@ -1,0 +1,81 @@
+#!/bin/bash
+
+BATTSAVER_DIR="/var/run/battery-saver/"
+mkdir -p "$BATTSAVER_DIR"
+
+GOVERNOR_SAVED="/var/run/battery-saver/governor.saved"
+GOVERNOR=""
+
+MODE="$(/usr/bin/knulli-settings-get system.batterysaver.mode)"
+
+AGGRESSIVE="$(/usr/bin/knulli-settings-get system.batterysaver.aggressive)"
+
+MUTE="$(/usr/bin/knulli-settings-get system.batterysaver.mute)"
+
+# Saver with holds (es_api_hold unit); the inline version below is the fallback
+SAVER="/userdata/system/patches/es_api_hold/knulli-aggressive-saver"
+
+check_pause() {
+  # return 0 if any *.pause exists, else 1
+  compgen -G "$BATTSAVER_DIR"/*.pause > /dev/null && return 0
+  return 1
+}
+
+do_aggressive() {
+  if [ -x "$SAVER" ]; then
+    "$SAVER" on
+    return
+  fi
+
+  # Pause emulator processes (we set to -4 niceness so this is easy to target)
+  for pid in $(ps -eo pid,ni | awk '$2==-4 {print $1}'); do
+    kill -STOP "$pid"
+  done
+  # Pause ES
+  /etc/init.d/S31emulationstation suspend
+
+  # Save current governor and set to powersave
+  if [[ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+    read -r GOVERNOR < /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || GOVERNOR=""
+    if [[ -n "$GOVERNOR" && "$GOVERNOR" != "powersave" ]]; then
+      echo "$GOVERNOR" > "$GOVERNOR_SAVED"
+      for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        echo powersave > "$g" 2>/dev/null || true
+      done
+    fi
+  fi
+}
+
+do_idle() {
+    case "$MODE" in
+        dim)
+            knulli-brightness dim
+            [[ "$MUTE" == "1" ]] && knulli-audio setSystemVolume mute
+
+            [[ "$AGGRESSIVE" == "1" ]] && do_aggressive
+        ;;
+        dispoff)
+            [[ "$MUTE" == "1" ]] && knulli-audio setSystemVolume mute
+            knulli-brightness dispoff
+
+            [[ "$AGGRESSIVE" == "1" ]] && do_aggressive
+        ;;
+        suspend)
+            knulli-suspend
+
+        ;;
+        shutdown)
+            knulli-shutdown -s
+        ;;
+    esac
+}
+
+case "$1" in
+    idle)
+        if ! check_pause; then
+            do_idle
+        fi
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,183 @@
+# Console fix bundles for the RG35XX-H: when knulli-cfw/knulli-linux publishes a release,
+# carry the owner's fix series onto it, rebuild ES and ConnMan against its image, re-pin the
+# firmware-tied units, test them, then sign and publish release bundle-<firmware slug>.
+# Lives on main of eduarbo/knulli-console-bundles (public, not a fork). The forks are only
+# read over git; resolution branches (claude/resolution-<tag>) are read as data only.
+name: Console bundle
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Knulli tag to build again (empty: every release that needs a bundle)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: console-bundle
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    # GitHub turns off the schedule of a public repository after 60 days without activity;
+    # enabling the workflow again through the API on every run is meant to keep it on (best
+    # effort: if GitHub still turns it off, it mails the owner and one click re-enables it).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/console-bundle.yml/enable"
+
+  detect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      todo: ${{ steps.detect.outputs.todo }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: detect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FORCE_TAG: ${{ inputs.tag }}
+        run: |
+          set +e
+          out=$(python3 -I pipeline/detect.py --ours "$GITHUB_REPOSITORY" ${FORCE_TAG:+--force "$FORCE_TAG"})
+          rc=$?
+          set -e
+          todo=$(printf '%s' "$out" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["todo"]))')
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+          printf '%s' "$out" | python3 -I -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          for t in d["todo"]: print("build %s: %s" % (t["tag"], t["why"]))
+          for w in d["warnings"]: print("::warning::" + w)
+          for e in d["errors"]: print("::error::" + e)' | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+  build:
+    needs: detect
+    if: ${{ !cancelled() && needs.detect.outputs.todo != '' && needs.detect.outputs.todo != '[]' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.detect.outputs.todo) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the release image
+        env:
+          URL: ${{ matrix.release.url }}
+          SHA: ${{ matrix.release.sha256 }}
+          ASSET: ${{ matrix.release.asset }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/image"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/image/$ASSET" "$URL"
+          echo "$SHA  $RUNNER_TEMP/image/$ASSET" | sha256sum -c -
+      - name: Build, re-pin and test
+        env:
+          TAG: ${{ matrix.release.tag }}
+          SHA: ${{ matrix.release.sha256 }}
+          ASSET: ${{ matrix.release.asset }}
+        run: |
+          set +e
+          bash pipeline/run.sh --tag "$TAG" --image "$RUNNER_TEMP/image/$ASSET" --image-sha256 "$SHA" \
+            --units units --work "$RUNNER_TEMP/work" --dist dist
+          rc=$?
+          cat dist/report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          # 0: complete; 3: some units excluded (published, then the run fails at the end so
+          # the owner gets GitHub's failure mail once per input change); 90: infrastructure;
+          # 2 or other: nothing to publish
+          [ "$rc" = 0 ] || [ "$rc" = 3 ]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle-${{ matrix.release.tag }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: [detect, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Holds BUNDLE_SIGNING_KEY_B64; the environment is restricted to main. Nothing from the
+    # build runs here: the artifact is data (JSON and tarballs), checked against the reviewed
+    # templates of this checkout before it is signed.
+    environment: bundle-signing
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.detect.outputs.todo) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle-${{ matrix.release.tag }}
+          path: dist
+      - name: Check the artifact against its manifest
+        run: |
+          python3 -I - dist <<'PY'
+          import hashlib, json, os, sys
+          d = sys.argv[1]
+          m = json.load(open(os.path.join(d, 'manifest.json')))
+          t = os.path.join(d, m['tarball']['name'])
+          assert hashlib.sha256(open(t, 'rb').read()).hexdigest() == m['tarball']['sha256'], 'tarball sha256'
+          assert os.path.getsize(t) == m['tarball']['size'], 'tarball size'
+          extra = set(os.listdir(d)) - {'manifest.json', 'report.md', m['tarball']['name'], 'series-%d.tar.gz' % m['serial']}
+          assert not extra, extra
+          print('artifact matches manifest %d' % m['serial'])
+          PY
+      - name: Every file is its reviewed template under the declared pin map, or declared derived
+        run: python3 -I pipeline/check_bundle.py --dist dist --units units --acceptance acceptance
+      - name: Privacy scan of the bundle
+        env:
+          PRIVACY_DENYLIST_B64: ${{ secrets.PRIVACY_DENYLIST_B64 }}
+        run: python3 -I pipeline/privacy_scan.py dist
+      - name: Sign the manifest
+        env:
+          BUNDLE_SIGNING_KEY_B64: ${{ secrets.BUNDLE_SIGNING_KEY_B64 }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/bundle-signing.pem"
+          printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 -d > "$key"
+          bash pipeline/sign.sh dist/manifest.json "$key" keys; rc=$?
+          rm -f "$key"
+          exit $rc
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist/manifest.json, dist/bundle-*.tar.gz'
+      - name: Publish the release (and series/<tag> when complete)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash pipeline/publish.sh dist keys
+      - name: Fail when a unit was left out
+        run: |
+          python3 -I - dist/manifest.json <<'PY'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          out = [u for u in m['units'] if u['status'] != 'included']
+          for u in out:
+              print('::error::%s excluded (%s): %s' % (u['id'], u.get('class'), u['reason']))
+          sys.exit(1 if out else 0)
+          PY

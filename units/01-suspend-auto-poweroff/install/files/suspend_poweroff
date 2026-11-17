@@ -1,0 +1,47 @@
+#!/bin/sh
+# Knulli user service (system.services): shut down after a time suspended.
+# Binds the patched knulli-suspend over the firmware one; the original stays
+# untouched underneath. Scoped to the verified Scarab build: any other
+# firmware or file fails closed and leaves the stock behavior.
+R="${UNIT_ROOT:-}"
+UNIT="$R/userdata/system/patches/suspend_poweroff"
+TARGET="$R/usr/bin/knulli-suspend"
+STOCK_SHA=8884cb4736860bc1518670e736f3eb0ad43650a9d7add97815a1ff0ff5d32621
+PATCHED_SHA=ce93c99c878d5a8434d3a7bec9982cf3fcc5d98b5e0bc415d6e4fe01c73c4f00
+
+sha() { sha256sum "$1" 2>/dev/null | cut -d ' ' -f 1; }
+# Say why in ES (it may still be starting) instead of failing silently
+refuse() {
+  (
+    i=0
+    while [ "$i" -lt 60 ]; do
+      curl -fs -m 2 -o /dev/null http://localhost:1234/notify -d "$1" && exit 0
+      i=$((i + 1))
+      sleep 5
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  exit 1
+}
+OFF='Apagado tras suspensión desactivado: el firmware o los archivos de la unidad 01 cambiaron.'
+
+case "$1" in
+  start)
+    [ "$(tr -d '\000' < "$R/proc/device-tree/model")" = 'Anbernic RG35XX-H' ] || exit 1
+    [ "$(cat "$R/usr/share/knulli/knulli.version")" = 'scarab 2026/05/11 00:09' ] || refuse "$OFF"
+    [ "$(sha "$UNIT/knulli-suspend")" = "$PATCHED_SHA" ] || refuse "$OFF"
+    current=$(sha "$TARGET")
+    [ "$current" = "$PATCHED_SHA" ] && exit 0
+    [ "$current" = "$STOCK_SHA" ] || refuse "$OFF"
+    mount --bind "$UNIT/knulli-suspend" "$TARGET" || refuse "$OFF"
+    ;;
+  stop)
+    # Kept until power off; rollback.sh removes it.
+    exit 0
+    ;;
+  status)
+    [ "$(sha "$TARGET")" = "$PATCHED_SHA" ]
+    ;;
+  *)
+    exit 1
+    ;;
+esac

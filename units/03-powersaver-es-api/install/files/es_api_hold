@@ -1,0 +1,62 @@
+#!/bin/sh
+# Knulli user service (system.services): battery saver with holds.
+# Binds the patched idle / active hooks over the firmware ones (originals
+# untouched underneath); they call the saver in this unit and fall back to
+# the stock inline code without it. Scoped to the verified Scarab build:
+# any other firmware or file fails closed and leaves the stock behavior.
+R="${UNIT_ROOT:-}"
+UNIT="$R/userdata/system/patches/es_api_hold"
+IDLE="$R/etc/idlewatcher/idle.d/01idle-hooks"
+ACTIVE="$R/etc/idlewatcher/active.d/01active-hooks"
+IDLE_STOCK=0eb6bf48a337f268c552c5b8b98e21e335100b746dab106e6e1b0775c0898dc0
+ACTIVE_STOCK=96ff5c140572091d7993162d433a6c9aeaef26084324ff50e5e6d17a0010172b
+IDLE_PATCHED=9e018df9d8aa7cca92a5a155390aa365dbca5324d37d2e6fe35791f2164f673f
+ACTIVE_PATCHED=d41b6730f855f36a346f84cfb7c55fae8281fae10f4f9377189504928b19d761
+SAVER_SHA=b9996a9855591a0913627df48b8f2edf8460e38788879a41e2cf2cb33784b2e0
+
+sha() { sha256sum "$1" 2>/dev/null | cut -d ' ' -f 1; }
+# Say why in ES (it may still be starting) instead of failing silently
+refuse() {
+  (
+    i=0
+    while [ "$i" -lt 60 ]; do
+      curl -fs -m 2 -o /dev/null http://localhost:1234/notify -d "$1" && exit 0
+      i=$((i + 1))
+      sleep 5
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  exit 1
+}
+OFF='Ahorro de batería con retenciones desactivado: el firmware o los archivos de la unidad 03 cambiaron.'
+
+# bind_if_stock <target> <stock sha> <patched sha> <source>
+bind_if_stock() {
+  [ "$(sha "$1")" = "$3" ] && return 0
+  mount --bind "$4" "$1"
+}
+
+case "$1" in
+  start)
+    [ "$(tr -d '\000' < "$R/proc/device-tree/model")" = 'Anbernic RG35XX-H' ] || exit 1
+    [ "$(cat "$R/usr/share/knulli/knulli.version")" = 'scarab 2026/05/11 00:09' ] || refuse "$OFF"
+    [ "$(sha "$UNIT/knulli-aggressive-saver")" = "$SAVER_SHA" ] || refuse "$OFF"
+    [ "$(sha "$UNIT/01idle-hooks")" = "$IDLE_PATCHED" ] || refuse "$OFF"
+    [ "$(sha "$UNIT/01active-hooks")" = "$ACTIVE_PATCHED" ] || refuse "$OFF"
+    idle=$(sha "$IDLE"); active=$(sha "$ACTIVE")
+    [ "$idle" = "$IDLE_STOCK" ] || [ "$idle" = "$IDLE_PATCHED" ] || refuse "$OFF"
+    [ "$active" = "$ACTIVE_STOCK" ] || [ "$active" = "$ACTIVE_PATCHED" ] || refuse "$OFF"
+    # Active first: it can undo both savers, so a half-done start stays safe
+    bind_if_stock "$ACTIVE" "$ACTIVE_STOCK" "$ACTIVE_PATCHED" "$UNIT/01active-hooks" || refuse "$OFF"
+    bind_if_stock "$IDLE" "$IDLE_STOCK" "$IDLE_PATCHED" "$UNIT/01idle-hooks" || refuse "$OFF"
+    ;;
+  stop)
+    # Kept until power off; rollback.sh removes it.
+    exit 0
+    ;;
+  status)
+    [ "$(sha "$IDLE")" = "$IDLE_PATCHED" ] && [ "$(sha "$ACTIVE")" = "$ACTIVE_PATCHED" ]
+    ;;
+  *)
+    exit 1
+    ;;
+esac

@@ -1,0 +1,171 @@
+#!/bin/bash
+# Knulli user service (v3): run ConnMan 1.42 with the generic optional-PMF fix.
+#
+# Stock ConnMan 1.42 sends ieee80211w=1 for WPA2/WPA3 transition networks. An explicit
+# per-network value skips wpa_supplicant's check for BIP support in the driver, and the
+# 8821cs driver of Knulli 20260511 has no BIP, so the link drops right after the group
+# handshake ("Failed to configure IGTK"). The candidate sets the per-interface Pmf=1
+# instead and lets wpa_supplicant drop PMF where the driver cannot do it. Nothing is
+# pinned to a network, interface name or router.
+#
+# The swap only lives in the rootfs tmpfs overlay: every boot starts stock ConnMan, and an
+# unknown stock binary (firmware update) is left alone with a notice.
+# Fallback when the candidate does not run, or Wi-Fi is configured and no default route comes
+# within CONNMAN_PMF_ROUTE_WAIT seconds: the v2 build on the card (SSID-pinned, joins the home
+# network), then stock only if v2 is missing. If no build gets a route (nothing in range), the
+# candidate stays when it runs, so a network joined later works.
+#   start   swap in the best build that connects, restart ConnMan
+#   restore put the stock binary back and restart ConnMan (used by rollback.sh)
+#   stop    nothing; the swap goes away at the next boot
+#   status  one line per fact, no network names
+R="${KNULLI_TEST_ROOT:-}"
+DIR="$R/userdata/system/patches/connman_pmf"
+CANDIDATE_FILE="$DIR/connmand-generic"
+V2_FILE="$DIR/connmand"
+BACKUP_FILE="$DIR/original-connmand"
+BIN="$R/usr/sbin/connmand"
+INIT="$R/etc/init.d/S08connman"
+LOG="$R/var/log/connman_pmf.log"
+ROUTE_WAIT="${CONNMAN_PMF_ROUTE_WAIT:-60}"
+CANDIDATE=a43f5ff1e9140fde0eab2db47ea3bea8d8d0962209256a19ea026e921d0f9928
+V2=cda54485fe1de38838791b59589fa30d33b954c8e64b7800b28c14b6b3812697
+STOCK=e83607dc10d2fa7638ca475bec973b36cb9b46b3a61ca0e0bc7f202dcf2375ef
+V1=7ba87d3fdc0e879973b834f4b93add692150a5a193f5f3ceb6768bc813b886aa   # a saved overlay could carry it
+
+sha() { sha256sum "$1" 2>/dev/null | cut -d ' ' -f 1; }
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$LOG"; }
+notify() {
+    (for _ in 1 2 3 4 5 6 7 8 9 10; do
+        curl -s -m 2 http://localhost:1234/notify -d "$1" >/dev/null 2>&1 && exit 0
+        sleep 3
+    done) &
+}
+name_of() { case "$1" in "$CANDIDATE") echo candidate ;; "$V2") echo v2 ;; "$STOCK") echo stock ;; *) echo other ;; esac; }
+
+# sha256 of the running daemon, empty unless exactly one connmand runs.
+active() {
+    local pids
+    pids=$(pidof connmand 2>/dev/null)
+    [ -n "$pids" ] && [ "$(echo "$pids" | wc -w)" -eq 1 ] || return 0
+    sha "$R/proc/$pids/exe"
+}
+has_route() { [ -n "$(ip route show default 2>/dev/null)" ]; }
+# Wi-Fi on and a network configured: then "works" means a default route, not just a process.
+wifi_expected() {
+    [ "$(knulli-settings-get wifi.enabled 2>/dev/null)" = 1 ] && [ -n "$(knulli-settings-get wifi.ssid 2>/dev/null)" ]
+}
+
+# Atomic replace inside /usr/sbin (tmpfs overlay upper layer).
+put() {
+    local source=$1 wanted=$2 tmp="$BIN.connman-pmf.$$"
+    [ "$(sha "$BIN")" = "$wanted" ] && return 0
+    [ "$(sha "$source")" = "$wanted" ] || return 1
+    cp "$source" "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" "$BIN" || { rm -f "$tmp"; return 1; }
+    [ "$(sha "$BIN")" = "$wanted" ]
+}
+
+restart_until() {
+    local wanted=$1
+    "$INIT" reload >/dev/null 2>&1
+    for _ in $(seq 1 40); do
+        [ "$(active)" = "$wanted" ] && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+# Run one build; 0 = running (and connected when Wi-Fi is expected), 1 = running without route,
+# 2 = not running.
+try_build() {
+    local file=$1 wanted=$2
+    if [ "$(active)" != "$wanted" ]; then
+        put "$file" "$wanted" || return 2
+        restart_until "$wanted" || return 2
+    fi
+    wifi_expected || return 0
+    for _ in $(seq 1 "$ROUTE_WAIT"); do has_route && return 0; sleep 1; done
+    has_route && return 0 || return 1
+}
+
+do_start() {
+    udevadm settle --timeout=10 >/dev/null 2>&1
+    local current rc
+    current=$(sha "$BIN")
+    case "$current" in
+        "$STOCK"|"$CANDIDATE"|"$V2"|"$V1") ;;
+        *)
+            log "unknown stock connmand $current (firmware changed?); left alone"
+            notify "Wi-Fi PMF fix inactive: this firmware has a different ConnMan"
+            return 0
+            ;;
+    esac
+    if [ "$current" = "$STOCK" ] && [ "$(sha "$BACKUP_FILE")" != "$STOCK" ]; then
+        # First run on this firmware: keep the stock binary for restore.
+        cp "$BIN" "$BACKUP_FILE.tmp" && chmod 0500 "$BACKUP_FILE.tmp" && mv -f "$BACKUP_FILE.tmp" "$BACKUP_FILE"
+    fi
+    if [ "$(sha "$BACKUP_FILE")" != "$STOCK" ]; then
+        log "no verified stock backup; not swapping"
+        return 1
+    fi
+    if [ "$(sha "$CANDIDATE_FILE")" != "$CANDIDATE" ]; then
+        log "candidate missing or changed"
+        rc=2
+    else
+        try_build "$CANDIDATE_FILE" "$CANDIDATE"; rc=$?
+    fi
+    if [ $rc -eq 0 ]; then log "candidate active"; return 0; fi
+    local candidate_rc=$rc v2_rc
+    log "candidate $( [ $rc -eq 1 ] && echo 'got no route' || echo 'did not run')"
+    if [ "$(sha "$V2_FILE")" = "$V2" ]; then
+        try_build "$V2_FILE" "$V2"; v2_rc=$?
+        if [ $v2_rc -eq 0 ]; then
+            log "v2 active (fallback)"
+            if [ $candidate_rc -eq 1 ]; then
+                notify "Wi-Fi: generic build got no connection; previous build connected"
+            else
+                notify "Wi-Fi PMF fix v3 failed; using the previous build"
+            fi
+            return 1
+        fi
+        if [ $candidate_rc -eq 1 ]; then
+            # No build connects (no known network in range): keep the generic one running.
+            if put "$CANDIDATE_FILE" "$CANDIDATE" && restart_until "$CANDIDATE"; then
+                log "no route with any build; candidate kept"
+                return 0
+            fi
+        elif [ $v2_rc -eq 1 ]; then
+            log "candidate did not run; v2 runs without route, kept"
+            return 1
+        fi
+    elif [ $candidate_rc -eq 1 ]; then
+        log "no route and no v2 on the card; candidate kept"
+        return 0
+    fi
+    log "falling back to stock ConnMan"
+    do_restore
+    notify "Wi-Fi PMF fix failed to start; stock ConnMan restored"
+    return 1
+}
+
+do_restore() {
+    [ "$(sha "$BIN")" = "$STOCK" ] && [ "$(active)" = "$STOCK" ] && return 0
+    put "$BACKUP_FILE" "$STOCK" || { log "restore failed: no verified stock backup"; return 1; }
+    restart_until "$STOCK" && { log "stock active"; return 0; }
+    log "stock ConnMan did not report back"
+    return 1
+}
+
+case "$1" in
+    start) do_start ;;
+    restore) do_restore ;;
+    stop) exit 0 ;;
+    status)
+        echo "binary=$(name_of "$(sha "$BIN")")"
+        echo "active=$(name_of "$(active)")"
+        echo "candidate_file=$( [ "$(sha "$CANDIDATE_FILE")" = "$CANDIDATE" ] && echo ok || echo bad)"
+        echo "v2_file=$( [ "$(sha "$V2_FILE")" = "$V2" ] && echo ok || echo missing)"
+        echo "stock_backup=$( [ "$(sha "$BACKUP_FILE")" = "$STOCK" ] && echo ok || echo missing)"
+        echo "route=$(has_route && echo yes || echo no)"
+        ;;
+    *) echo "usage: $0 start|stop|restore|status" >&2; exit 1 ;;
+esac

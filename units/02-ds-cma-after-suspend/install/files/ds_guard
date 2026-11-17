@@ -1,0 +1,18 @@
+#!/bin/sh
+# Knulli user service (system.services): after a DS recovery reboot, start
+# the game that triggered it once EmulationStation answers (one shot).
+R="${UNIT_ROOT:-}"
+GUARD="$R/userdata/system/scripts/ds-ion-guard.sh"
+case "$1" in
+  start)
+    [ -f "$R/userdata/system/ds-guard/relaunch" ] || exit 0
+    [ -x "$GUARD" ] || exit 1
+    setsid "$GUARD" relaunch </dev/null >/dev/null 2>&1 &
+    ;;
+  stop)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
