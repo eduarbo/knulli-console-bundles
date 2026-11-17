@@ -1,0 +1,7 @@
+# <system or ROM folder>	<rom file name>	key=value ...  (unit 18; each line measured with the probe harness, VALIDATION.md)
+arcade	pbobble2u.zip	governor=performance maxfreq=1704000
+arcade	mk3.zip	governor=performance maxfreq=1704000
+arcadetate	gunlock.zip	governor=performance maxfreq=1704000
+arcadetate	tcobra2.zip	governor=performance maxfreq=1704000
+n64	Perfect Dark (USA) (Rev-A).z64	governor=performance maxfreq=1704000
+n64	Conker's Bad Fur Day (USA).z64	governor=performance maxfreq=1704000

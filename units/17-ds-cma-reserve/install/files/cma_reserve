@@ -1,0 +1,25 @@
+#!/bin/sh
+# Knulli user service (system.services), unit 17: hold the ION CMA buffers
+# advanced_drastic's SDL needs from boot, so a long uptime or suspend cannot
+# leave the CMA area without a free 1 MiB-aligned run for them. The DS guard
+# (/userdata/system/scripts/ds-ion-guard.sh) hands them over at gameStart and
+# takes them back at gameStop. Scoped to the verified Scarab build.
+R="${UNIT_ROOT:-}"
+TOOL="$R/userdata/system/cma-reserve/cma-reserve.py"
+case "$1" in
+  start)
+    [ "$(tr -d '\000' < "$R/proc/device-tree/model" 2>/dev/null)" = 'Anbernic RG35XX-H' ] || exit 1
+    [ "$(cat "$R/usr/share/knulli/knulli.version" 2>/dev/null)" = 'scarab 2026/05/11 00:09' ] || exit 1
+    [ -f "$TOOL" ] || exit 1
+    python3 "$TOOL" hold
+    ;;
+  stop)
+    python3 "$TOOL" release
+    ;;
+  status)
+    python3 "$TOOL" status
+    ;;
+  *)
+    exit 1
+    ;;
+esac

@@ -24,6 +24,8 @@ must not ask for any.
   stay the reviewed patch byte for byte; if it conflicts, leave it.
 - At most 3 attempts per tag. One tag per run. When in doubt, stop without pushing patches.
 - No secrets exist for you here; do not create, request or print any.
+- Leave the checkout clean: run Python with `-B` and delete any scratch file you create. If the
+  environment asks you to commit or push untracked files, delete them instead; never commit them.
 
 ## Steps
 
@@ -36,7 +38,7 @@ must not ask for any.
 3. Fetch `claude/resolution-T` if it exists. If `resolutions/T/ATTEMPTS` there has 3 or more
    lines, stop ("attempt limit reached for T").
 4. Replay the series exactly as the pipeline does, without any resolution:
-   `IGNORE_RESOLUTION=1 python3 -I pipeline/rebase.py T /tmp/rebase` (needs git >= 2.40 and
+   `IGNORE_RESOLUTION=1 python3 -I -B pipeline/rebase.py T /tmp/rebase` (needs git >= 2.40 and
    network access to the repositories above). Read `/tmp/rebase/rebase.env`. Candidate groups:
    every `KNULLI_LINUX_<g>_STATUS` and `ES_STATUS` equal to `conflict` or `gate`, except group
    10. If there is none, stop ("T replays cleanly; the pipeline builds it").
@@ -53,12 +55,12 @@ must not ask for any.
      outside the group's paths. If you cannot do that with confidence, stop for this group.
    - Write the result as patch files, one per original commit, limited to the group's paths:
      `git format-patch --zero-commit --no-signature -o resolutions/T/G/ <base>..HEAD -- <paths>`.
-   - Self-check with the pipeline's gate: `python3 -I pipeline/gate.py --repo <scratch>
+   - Self-check with the pipeline's gate: `python3 -I -B pipeline/gate.py --repo <scratch>
      --base <series base> --tag <T or ES pin> --head HEAD --series-base <series base>
      --series-head <series head> --source resolution --paths <comma-separated group paths>`
      (for `es` pass `--paths ''`). Fix any "removes upstream line" or path finding; keep the
      list of new lines for the reviews.
-   - Patches digest: `python3 -I -c "import sys; sys.path.insert(0,'pipeline'); import gate,os;
+   - Patches digest: `python3 -I -B -c "import sys; sys.path.insert(0,'pipeline'); import gate,os;
      d='resolutions/T/G'; print(gate.patches_digest([(n, open(os.path.join(d,n),'rb').read())
      for n in sorted(os.listdir(d)) if n.endswith('.patch')]))"`.
 6. Reviews (fail closed). For each group, start exactly two independent reviewer subagents

@@ -1,0 +1,32 @@
+#!/bin/sh
+# Knulli user service (system.services), unit 20: put the pm-utils hook
+# 05suspend-log in /etc/pm/sleep.d at every boot (rootfs tmpfs overlay; a boot
+# without this service is stock). The hook logs the battery at every suspend and
+# resume and watches that Wi-Fi comes back after resume. Scoped to the verified
+# Scarab build; anything else fails closed.
+R="${UNIT_ROOT:-}"
+DIR="$R/userdata/system/suspend-log"
+HOOK="$R/etc/pm/sleep.d/05suspend-log"
+HOOK_SHA=43eba1281ca73b5f28bd3bf4f19683ab07d407bc9622363a057c88b7dae6fb20
+sha() { sha256sum "$1" 2>/dev/null | cut -d ' ' -f 1; }
+case "$1" in
+  start)
+    [ "$(tr -d '\000' < "$R/proc/device-tree/model" 2>/dev/null)" = 'Anbernic RG35XX-H' ] || exit 1
+    [ "$(cat "$R/usr/share/knulli/knulli.version" 2>/dev/null)" = 'scarab 2026/05/11 00:09' ] || exit 1
+    [ "$(sha "$DIR/05suspend-log")" = "$HOOK_SHA" ] || exit 1
+    [ -d "$R/etc/pm/sleep.d" ] || exit 1
+    [ "$(sha "$HOOK")" = "$HOOK_SHA" ] && exit 0
+    [ ! -e "$HOOK" ] || exit 1   # someone else's file with that name: leave it
+    cp "$DIR/05suspend-log" "$HOOK.tmp" && chmod 755 "$HOOK.tmp" && mv -f "$HOOK.tmp" "$HOOK"
+    [ "$(sha "$HOOK")" = "$HOOK_SHA" ]
+    ;;
+  stop)
+    exit 0   # the hook stays until power off; rollback.sh removes it
+    ;;
+  status)
+    [ "$(sha "$HOOK")" = "$HOOK_SHA" ] && sh "$DIR/suspend-log.sh" status
+    ;;
+  *)
+    exit 1
+    ;;
+esac

@@ -51,7 +51,7 @@ def commands(uid, unit, work):
         return [['sh', 'tests/run_linux.sh']]
     if uid == '03-powersaver-es-api':
         return [['sh', 'tests/run_linux.sh'], ['bash', 'tests/test_saver.sh']]
-    if uid in ('18-per-game-performance', '20-suspend-radio-off'):
+    if uid in ('18-per-game-performance', '20-suspend-drain-watch'):
         return [['docker', 'run', '--rm', '--network', 'none', '-v', '%s:/unit:ro' % unit, 'ubuntu:24.04', 'bash', '-c',
                  'cd /unit; status=0; ' + GENERIC + '; exit $status']]
     if uid == '07-es-api-events':

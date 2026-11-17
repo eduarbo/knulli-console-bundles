@@ -72,6 +72,10 @@ KILL_SWITCH = {
     'service': KILL_SWITCH_COMMENT +
     'if [ "${1:-}" = start ] && [ -e "${FIXES_OFF:-/boot/fixes-off}" ]; then echo "fixes-off: $0 not started"; exit 0; fi\n',
     'hook': KILL_SWITCH_COMMENT + 'if [ -e "${FIXES_OFF:-/boot/fixes-off}" ]; then exit 0; fi\n',
+    # The Wi-Fi fix is the way back in: stock ConnMan cannot join the home network, so only
+    # fixes-off-all stops it (fixes-off alone would also cut SSH and the next bundle)
+    'lifeline': '# Kill switch (unit 16): only fixes-off-all on the FAT boot partition stops this fix.\n'
+    'if [ "${1:-}" = start ] && [ -e "${FIXES_OFF_ALL:-/boot/fixes-off-all}" ]; then echo "fixes-off-all: $0 not started"; exit 0; fi\n',
 }
 
 
@@ -314,7 +318,6 @@ def unit18(ctx, uid, m):
 
 
 def unit20(ctx, uid, m):
-    ctx.require_pins(['KERNEL'], 'kernel (Wi-Fi/Bluetooth power-down at suspend)')
     src, dst = copy_template(ctx, uid, m)
     m[template_version(ctx.units)] = ctx.version
     return dst, [], []
@@ -441,8 +444,8 @@ UNITS = {
         entry=[('files/service.sh', 'service')], requires_soft=['03-powersaver-es-api']),
     '10-wifi-pmf-8821cs': dict(
         derive=unit10, title='Wi-Fi PMF', device_dir='/userdata/system/upstream-install/10',
-        install='bash install.sh', rollback='bash rollback.sh --stock', install_timeout=600,
-        entry=[('files/connman_pmf', 'service')]),
+        install='bash install.sh', rollback='bash rollback.sh', install_timeout=600,
+        entry=[('files/connman_pmf', 'lifeline')]),
     '17-ds-cma-reserve': dict(
         derive=unit17, title='reserva CMA para DS', device_dir='/userdata/system/upstream-install/17',
         install='sh install.sh', rollback='sh rollback.sh', install_timeout=300,
@@ -452,10 +455,10 @@ UNITS = {
         derive=unit18, title='rendimiento por juego', device_dir='/userdata/system/upstream-install/18',
         install='sh install.sh', rollback='sh rollback.sh', install_timeout=300,
         entry=[('files/game-performance.sh', 'hook')]),
-    '20-suspend-radio-off': dict(
-        derive=unit20, title='radios apagadas en suspensión', device_dir='/userdata/system/upstream-install/20',
+    '20-suspend-drain-watch': dict(
+        derive=unit20, title='registro de suspensión y Wi-Fi tras reanudar', device_dir='/userdata/system/upstream-install/20',
         install='sh install.sh', rollback='sh rollback.sh', install_timeout=300,
-        entry=[('files/radio_sleep', 'service')]),
+        entry=[('files/suspend_log', 'service')]),
 }
 
 

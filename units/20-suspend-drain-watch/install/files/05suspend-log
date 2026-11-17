@@ -1,0 +1,6 @@
+#!/bin/sh
+# pm-utils sleep hook of unit 20, placed in /etc/pm/sleep.d (tmpfs overlay) by the
+# suspend_log service at every boot. Never fails a suspend.
+S=/userdata/system/suspend-log/suspend-log.sh
+[ -f "$S" ] && exec /bin/sh "$S" "$@"
+exit 0
