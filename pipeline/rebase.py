@@ -4,8 +4,13 @@
 usage: rebase.py TAG WORK_DIR        (config: pipeline/config.env or $PIPELINE_CONFIG)
 
 Per group of KNULLI_GROUPS (the fork commits a bundle unit derives from, by path) and for
-the ES series (onto the ES commit TAG pins), the first source that exists wins:
-  override    branch knulli-<TAG>-fixes of the fork (the owner's resolution), as is;
+the ES series, the first source that exists wins. The ES series goes onto the ES TAG ships:
+the commit TAG pins plus the patches Buildroot applies to that package (Knulli's package
+patches, see package_patches), so the build is Knulli's ES with the fixes on top.
+  override    branch knulli-<TAG>-fixes of the fork (the owner's resolution), as is; for ES
+              as is when built on that patched ES (branch knulli-es-<TAG> of a rebase.py
+              run), else its commits after the ES pin, replayed onto the patched ES (a commit
+              that repeats a package patch becomes empty and is dropped);
   unchanged   TAG is the series base: the fork branch as is;
   replay      the series replayed with git merge-tree: the series of the newest tag
               series/<T> of BUNDLES_GIT (the resolved series of the last complete bundle, T
@@ -173,6 +178,87 @@ def apply_patches(repo, onto, patches):
     return head
 
 
+def build_config(repo, ref, path, seen=()):
+    """Assignments of a Knulli board file at ref, includes first (configs/<name>), in order."""
+    if path in seen:
+        raise Conflict('include loop at %s' % path)
+    r = git(repo, 'show', '%s:%s' % (ref, path), check=False)
+    if r.returncode:
+        raise Conflict('no %s at %s: cannot tell which ES patches Knulli applies' % (path, ref))
+    values = []
+    for line in r.stdout.decode(errors='replace').split('\n'):
+        line = line.strip()
+        m = re.match(r'^include\s+(\S+)$', line)
+        if m:
+            values += build_config(repo, ref, os.path.join(os.path.dirname(path), m.group(1)), seen + (path,))
+        elif re.match(r'^BR2_[A-Z0-9_]+=', line):
+            values.append(tuple(line.split('=', 1)))
+    return values
+
+
+def package_patches(K, ref):
+    """The patches Buildroot applies to the ES package at ref, in its order: the package folder
+    (dirname of ES_PIN_FILE), then <dir>/<package> of each BR2_GLOBAL_PATCH_DIR entry of
+    ES_BOARD_FILE; per folder its series file, else *.patch and *.patch.<ES_PATCH_ARCH> sorted
+    as in the C locale; a <version> subfolder replaces its folder. [(path, bytes)]."""
+    pkg_dir = os.path.dirname(CFG['ES_PIN_FILE'])
+    pkg = os.path.basename(CFG['ES_PIN_FILE'])[:-len('.mk')]
+    dirs = [pkg_dir]
+    if CFG.get('ES_BOARD_FILE'):
+        assigned = [v for k, v in build_config(K, ref, CFG['ES_BOARD_FILE']) if k == 'BR2_GLOBAL_PATCH_DIR']
+        for d in ' '.join(shlex.split(assigned[-1])).split() if assigned else []:
+            rel = re.sub(r'^\$\(BR2_EXTERNAL_KNULLI_PATH\)/?', '', d).rstrip('/')
+            if '$' in rel or rel.startswith('/') or '..' in rel.split('/'):
+                raise Conflict('BR2_GLOBAL_PATCH_DIR entry %s is outside knulli-linux' % d)
+            dirs.append(rel + '/' + pkg)
+    mk = out(K, 'show', '%s:%s' % (ref, CFG['ES_PIN_FILE']))
+    version = re.search(r'^%s *= *(\S+)' % re.escape(CFG['ES_PIN_VAR']), mk, re.M).group(1)
+    arch = CFG.get('ES_PATCH_ARCH', '')
+    found = []
+    for d in dirs:
+        parts = d.split('/')
+        for i in range(1, len(parts) + 1):   # a folder inside a submodule cannot be read here
+            mode = out(K, 'ls-tree', ref, '--', '/'.join(parts[:i])).split(' ')[0]
+            if mode == '160000':
+                raise Conflict('%s is inside a submodule: cannot read its ES patches' % d)
+        names = out(K, 'ls-tree', '--name-only', '%s:%s' % (ref, d), check=False).split('\n')
+        if version in names:
+            d = d + '/' + version
+            names = out(K, 'ls-tree', '--name-only', '%s:%s' % (ref, d)).split('\n')
+        if 'series' in names:
+            order = [l.strip() for l in out(K, 'show', '%s:%s/series' % (ref, d)).split('\n')
+                     if l.strip() and not l.lstrip().startswith('#')]
+        else:
+            order = sorted((n for n in names if n.endswith('.patch') or (arch and n.endswith('.patch.' + arch))),
+                           key=lambda n: n.encode())
+        found += [('%s/%s' % (d, n), git(K, 'show', '%s:%s/%s' % (ref, d, n)).stdout) for n in order]
+    return found
+
+
+def apply_package_patches(repo, onto, patches, tag):
+    """Knulli's package patches of tag onto the ES commit, one commit each (fixed identity and
+    date, so the same tag gives the same commits)."""
+    head = rev(repo, onto)
+    with tempfile.TemporaryDirectory() as tmp:
+        idx = dict(GIT_INDEX_FILE=os.path.join(tmp, 'index'))
+        for path, data in patches:
+            p = os.path.join(tmp, 'p')
+            with open(p, 'wb') as f:
+                f.write(data)
+            git(repo, 'read-tree', head, env=idx)
+            r = git(repo, 'apply', '--cached', '--whitespace=nowarn', p, env=idx, check=False)
+            if r.returncode != 0:
+                raise Conflict('Knulli package patch %s does not apply onto %s: %s' % (
+                    path, onto, r.stderr.decode(errors='replace').strip()[-600:]))
+            tree = out(repo, 'write-tree', env=idx)
+            env = dict(COMMITTER, GIT_AUTHOR_NAME=COMMITTER['GIT_COMMITTER_NAME'],
+                       GIT_AUTHOR_EMAIL=COMMITTER['GIT_COMMITTER_EMAIL'],
+                       GIT_AUTHOR_DATE=COMMITTER.get('GIT_COMMITTER_DATE', '0 +0000'))
+            head = out(repo, 'commit-tree', tree, '-p', head, env=env,
+                       data=('Knulli %s package patch %s\n' % (tag, path)).encode())
+    return head
+
+
 def tree_patches(repo, ref, folder):
     files = out(repo, 'ls-tree', '--name-only', '%s:%s' % (ref, folder), check=False)
     names = sorted(n for n in files.split('\n') if n.endswith('.patch'))
@@ -215,8 +301,10 @@ def find_resolution(repos):
     return refs[ref]
 
 
-def group(repo, name, fork, onto, original, carried, paths, resolution, report_only=False):
-    """Carry one group; returns (status, head). original/carried: (base, head, commits)."""
+def group(repo, name, fork, onto, original, carried, paths, resolution, report_only=False, override_base=None):
+    """Carry one group; returns (status, head). original/carried: (base, head, commits).
+    override_base: an override that does not contain onto but contains override_base has its
+    commits after override_base replayed onto onto (ES: onto is the pin plus Knulli's patches)."""
     key = name.upper().replace('-', '_')
     override = 'knulli-%s-fixes' % TAG
     o_base, o_head, o_commits = original
@@ -227,9 +315,17 @@ def group(repo, name, fork, onto, original, carried, paths, resolution, report_o
         emit('INPUT_OVERRIDE_' + key, refs['refs/heads/' + override])
         git(repo, 'fetch', '-q', 'origin', '+refs/heads/%s:refs/remotes/origin/%s' % (override, override), network=True)
         head, source = rev(repo, 'origin/' + override), 'override'
-        if git(repo, 'merge-base', '--is-ancestor', onto, head, check=False).returncode:
-            conflict, head = '%s does not contain %s' % (override, onto), None
-        applied = out(repo, 'log', '--reverse', '--format=%H %s', '%s..%s' % (onto, head)).split('\n') if head else []
+        contains = lambda c: git(repo, 'merge-base', '--is-ancestor', c, head, check=False).returncode == 0
+        if contains(onto):
+            applied = out(repo, 'log', '--reverse', '--format=%H %s', '%s..%s' % (onto, head)).split('\n')
+        elif override_base and contains(override_base):
+            try:
+                head, applied, dropped = replay(repo, name, onto, override_base,
+                                                out(repo, 'rev-list', '--reverse', '%s..%s' % (override_base, head)).split())
+            except Conflict as e:
+                conflict, head = str(e), None
+        else:
+            conflict, head = '%s does not contain %s' % (override, override_base or onto), None
     elif rev(repo, onto) == rev(repo, s_base):
         head, source = s_head, 'unchanged'
         applied = ['%s %s' % (c, out(repo, 'log', '-1', '--format=%s', c)) for c in s_commits]
@@ -319,6 +415,28 @@ def reconstruct(repo, base, patches):
     return rev(repo, base), head, commits
 
 
+def es_series(E, K, es_pin, es_onto, carry, resolution_sha):
+    """Carry the ES series onto es_onto (the pin plus Knulli's package patches)."""
+    e_base, e_ref = CFG['ES_SERIES_BASE'], 'origin/' + CFG['ES_SERIES_REF']
+    original = (rev(E, e_base), rev(E, e_ref), series_commits(E, e_base, e_ref))
+    carried = None
+    if carry:
+        git(E, 'fetch', '-q', '--no-tags', 'bundles', '+refs/tags/series/%s:refs/carry/%s' % (carry[1], carry[1]),
+            network=True)
+        pin = carry[3].get('ES_PIN', '')
+        if git(E, 'cat-file', '-e', pin + '^{commit}', check=False).returncode:
+            git(E, 'fetch', '-q', '--no-tags', 'upstream', pin, network=True)
+        # A series made on the pin plus that tag's package patches (ES_KNULLI_PATCHES_SHA256 in
+        # meta.env) goes back on that base; an older one was made on the bare pin
+        if carry[3].get('ES_KNULLI_PATCHES_SHA256'):
+            carry_pkg = package_patches(K, carry[2])
+            if gate.patches_digest(carry_pkg) != carry[3]['ES_KNULLI_PATCHES_SHA256']:
+                raise RuntimeError('package patches of %s differ from series/%s' % (carry[2], carry[1]))
+            pin = apply_package_patches(E, pin, carry_pkg, carry[1])
+        carried = reconstruct(E, pin, tree_patches(E, 'refs/carry/' + carry[1], 'es'))
+    return group(E, 'es', CFG['ES_FORK'], es_onto, original, carried, [], resolution_sha, override_base=es_pin)
+
+
 def main():
     os.makedirs(WORK, exist_ok=True)
     for f in os.listdir(WORK):
@@ -386,25 +504,29 @@ def main():
         sys.exit(1)
     es_pin = m.group(1)
     emit('ES_PIN', es_pin)
-    emit('ES_ONTO', es_pin)
     br = out(K, 'ls-tree', TAG, 'buildroot').split()
     emit('BUILDROOT_COMMIT', br[2] if len(br) > 2 else '')
 
-    # --- EmulationStation ---
+    # --- EmulationStation: the series goes onto the ES TAG ships (pin + Knulli's patches) ---
     if git(E, 'cat-file', '-e', es_pin + '^{commit}', check=False).returncode:
         git(E, 'fetch', '-q', '--no-tags', 'upstream', es_pin, network=True)
     emit('INPUT_ES_SERIES', rev(E, 'origin/' + CFG['ES_SERIES_REF']))
-    e_base, e_ref = CFG['ES_SERIES_BASE'], 'origin/' + CFG['ES_SERIES_REF']
-    original = (rev(E, e_base), rev(E, e_ref), series_commits(E, e_base, e_ref))
-    carried = None
-    if carry:
-        git(E, 'fetch', '-q', '--no-tags', 'bundles', '+refs/tags/series/%s:refs/carry/%s' % (carry[1], carry[1]),
-            network=True)
-        pin = carry[3].get('ES_PIN', '')
-        if git(E, 'cat-file', '-e', pin + '^{commit}', check=False).returncode:
-            git(E, 'fetch', '-q', '--no-tags', 'upstream', pin, network=True)
-        carried = reconstruct(E, pin, tree_patches(E, 'refs/carry/' + carry[1], 'es'))
-    status, head = group(E, 'es', CFG['ES_FORK'], es_pin, original, carried, [], resolution_sha)
+    try:
+        pkg = package_patches(K, TAG)
+        es_onto = apply_package_patches(E, es_pin, pkg, TAG)
+    except Conflict as e:
+        # Knulli's own patches cannot be applied here, so its ES cannot be rebuilt: unit 07 out
+        with open(os.path.join(WORK, 'conflict-es.txt'), 'w') as f:
+            f.write('group:   es\nKnulli ES package patches of %s: %s\n' % (TAG, e))
+        for k, v in (('ES_STATUS', 'conflict'), ('ES_SOURCE', 'package'), ('ES_APPLIED', 0), ('ES_DROPPED', 0)):
+            emit(k, v)
+        status, head = 'conflict', None
+    else:
+        git(E, 'update-ref', 'refs/heads/knulli-es-%s' % TAG, es_onto)
+        emit('ES_ONTO', es_onto)
+        emit('ES_KNULLI_PATCHES', ' '.join(p for p, _ in pkg))
+        emit('ES_KNULLI_PATCHES_SHA256', gate.patches_digest(pkg))
+        status, head = es_series(E, K, es_pin, es_onto, carry, resolution_sha)
     if status == 'ok':
         git(E, 'checkout', '-q', '--force', '--detach', head)
         r = git(E, 'submodule', 'update', '-q', '--init', '--recursive', '--depth', '1', check=False)

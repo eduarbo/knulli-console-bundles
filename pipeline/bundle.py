@@ -139,7 +139,9 @@ def main():
     sources = dict(
         knulli_linux=dict(fork=cfg['KNULLI_FORK'], onto=rebase['KNULLI_LINUX_ONTO'],
                           groups={g: group('knulli-linux-' + g) for g in knulli_groups}),
-        es=dict(group('es'), fork=cfg['ES_FORK'], onto=rebase['ES_ONTO']),
+        es=dict(group('es'), fork=cfg['ES_FORK'], onto=rebase.get('ES_ONTO', ''),
+                knulli_patches=rebase.get('ES_KNULLI_PATCHES', '').split(),
+                knulli_patches_sha256=rebase.get('ES_KNULLI_PATCHES_SHA256', '')),
         es_pin=rebase['ES_PIN'], buildroot=rebase['BUILDROOT_COMMIT'])
 
     manifest = dict(
@@ -197,8 +199,9 @@ def main():
         g, v['status'], v['mode'], len(v['applied']), len(v['dropped_as_upstream']),
         ('; head `%s`' % v['head']) if v.get('head') else '')
         for g, v in sources['knulli_linux']['groups'].items()] + [
-        'ES series: %s, %s onto `%s`, %d applied, %d dropped%s.' % (
-            sources['es']['status'], sources['es']['mode'], sources['es']['onto'], len(sources['es']['applied']),
+        'ES series: %s, %s onto `%s` (ES pin `%s` plus %d Knulli package patches), %d applied, %d dropped%s.' % (
+            sources['es']['status'], sources['es']['mode'], sources['es']['onto'], rebase['ES_PIN'],
+            len(sources['es']['knulli_patches']), len(sources['es']['applied']),
             len(sources['es']['dropped_as_upstream']),
             ('; tree `%s`' % sources['es']['tree']) if sources['es'].get('tree') else ''),
         '',

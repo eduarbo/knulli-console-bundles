@@ -2,10 +2,12 @@
 # Build the patched EmulationStation for the H700 against a release's own libraries.
 #   build_es.sh SYSROOT ES_SOURCE OUT_DIR
 # Same recipe as unit 07's install/build/build-es.sh (Debian 12 headers and GCC 12, linked
-# against the firmware libraries, -DH700, GLES2, pulse, TTS, -lmali), with three changes:
+# against the firmware libraries, -DH700, GLES2, pulse, TTS, -lmali), with four changes:
 # the sysroot comes from extract.sh (any partition layout), the source is copied into the
-# container (the checkout stays clean) and SOURCE_DATE_EPOCH fixes __DATE__/__TIME__, so the
-# same inputs give the same binary.
+# container (the checkout stays clean), SOURCE_DATE_EPOCH fixes __DATE__/__TIME__, so the
+# same inputs give the same binary, and es-sdl-knulli.h declares the joystick functions of
+# Knulli's SDL2 that Knulli's ES package patches call (Debian's SDL2 headers lack them; the
+# binary resolves them in the firmware's libSDL2, which the chroot check below proves).
 # Exit INFRA_EXIT when apt cannot fetch (infrastructure, not the unit's fault).
 # Gates (exit 1): the binary must load with the firmware's loader and libraries
 # (LD_BIND_NOW=1 chroot SYSROOT emulationstation --help prints "Version"), and it may only
@@ -40,7 +42,7 @@ cp -a /in/src/. /src/ && rm -rf /src/.git
 cd /build
 cmake /src -DGLES2=ON -DBATOCERA=ON -DKNULLI=ON -DDISABLE_KODI=ON -DENABLE_PULSE=ON \
 	-DENABLE_TTS=ON -DCEC=OFF -DENABLE_FILEMANAGER=OFF -DCMAKE_BUILD_TYPE=Release \
-	-DCMAKE_CXX_FLAGS=-DH700 -DOPENGLES2_INCLUDE_DIR=/usr/include -DPYTHON3_EXECUTABLE=/bin/true \
+	"-DCMAKE_CXX_FLAGS=-DH700 -include /tools/es-sdl-knulli.h" -DOPENGLES2_INCLUDE_DIR=/usr/include -DPYTHON3_EXECUTABLE=/bin/true \
 	"-DCMAKE_LIBRARY_PATH=/sysroot/usr/lib;/sysroot/lib" \
 	"-DCMAKE_EXE_LINKER_FLAGS=-L/sysroot/usr/lib -L/sysroot/lib -Wl,-rpath-link,/sysroot/usr/lib:/sysroot/lib -Wl,--allow-shlib-undefined -Wl,--no-as-needed -lmali" \
 	> /out/es-cmake.log

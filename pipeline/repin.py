@@ -356,8 +356,11 @@ def manifest_fields(path):
 def unit07(ctx, uid, m):
     es = os.path.join(ctx.work, 'es-build')
     status = ctx.rebase.get('ES_STATUS')
+    if status != 'ok' and ctx.rebase.get('ES_SOURCE') == 'package':
+        raise Excluded("Knulli's ES package patches of %s do not apply onto the ES commit it pins (see "
+                       "conflict-es.txt): the ES it ships cannot be rebuilt here" % ctx.tag, 'conflict')
     if status != 'ok':
-        raise Excluded('ES fix series %s on the ES commit %s pins: %s' % (
+        raise Excluded('ES fix series %s on the ES %s ships: %s' % (
             'rejected by the gate' if status == 'gate' else 'does not apply', ctx.tag, conflict_line(ctx.work, 'es')),
             'gate' if status == 'gate' else 'conflict')
     if open(os.path.join(es, 'es.status')).read().strip() != '0':

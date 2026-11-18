@@ -41,22 +41,26 @@ must not ask for any.
    `IGNORE_RESOLUTION=1 python3 -I -B pipeline/rebase.py T /tmp/rebase` (needs git >= 2.40 and
    network access to the repositories above). Read `/tmp/rebase/rebase.env`. Candidate groups:
    every `KNULLI_LINUX_<g>_STATUS` and `ES_STATUS` equal to `conflict` or `gate`, except group
-   10. If there is none, stop ("T replays cleanly; the pipeline builds it").
+   10, and except `es` when `ES_SOURCE` is `package` (Knulli's own ES package patches do not
+   apply onto its ES pin: nothing of ours to resolve). If there is none, stop ("T replays
+   cleanly; the pipeline builds it").
 5. For each candidate group G (`knulli-linux-01`, `knulli-linux-03` or `es`):
    - Read `routine/intent/G.md`, the conflict report `/tmp/rebase/conflict-G.txt`, the
      original series commits of the group (in `/tmp/rebase/knulli-linux` or `/tmp/rebase/es`:
      `git log -p <series base>..origin/<series ref> -- <group paths>`; for a carried series,
      the patches of tag `series/<previous tag>`), and the upstream changes between the series
      base and T in the files those commits touch.
-   - In a scratch clone, start from T (for `es`: the ES commit T pins, `ES_PIN` in
-     rebase.env) and apply each commit of the group in order, resolving conflicts so that every
-     upstream change is kept and the fix keeps the intent. Smallest possible change; no
-     refactoring, no new behaviour, no new files beyond what the original commit had, no paths
-     outside the group's paths. If you cannot do that with confidence, stop for this group.
+   - In a scratch clone, start from T (for `es`: the ES T ships, `ES_ONTO` in rebase.env and
+     branch `knulli-es-T` in `/tmp/rebase/es`: the ES commit T pins plus Knulli's package
+     patches, which count as upstream) and apply each commit of the group in order, resolving
+     conflicts so that every upstream change is kept and the fix keeps the intent. Smallest
+     possible change; no refactoring, no new behaviour, no new files beyond what the original
+     commit had, no paths outside the group's paths. If you cannot do that with confidence,
+     stop for this group.
    - Write the result as patch files, one per original commit, limited to the group's paths:
      `git format-patch --zero-commit --no-signature -o resolutions/T/G/ <base>..HEAD -- <paths>`.
    - Self-check with the pipeline's gate: `python3 -I -B pipeline/gate.py --repo <scratch>
-     --base <series base> --tag <T or ES pin> --head HEAD --series-base <series base>
+     --base <series base> --tag <T or ES_ONTO> --head HEAD --series-base <series base>
      --series-head <series head> --source resolution --paths <comma-separated group paths>`
      (for `es` pass `--paths ''`). Fix any "removes upstream line" or path finding; keep the
      list of new lines for the reviews.

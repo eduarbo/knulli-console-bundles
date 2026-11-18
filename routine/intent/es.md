@@ -1,4 +1,5 @@
-# Intent: the ES series (eduarbo/batocera-emulationstation, onto the commit the tag pins)
+# Intent: the ES series (eduarbo/batocera-emulationstation, onto the ES the tag ships: the commit
+# it pins plus Knulli's package patches)
 
 Six commits, in order:
 1. /addgames applies default metadata values for existing games: when a posted entry sets a
@@ -22,8 +23,9 @@ Six commits, in order:
    /var/run/knulli-settings-set.lock flock from reading to replacing (at most 2 s).
 
 Invariants for a resolution:
-- Keep every upstream change; re-express each fix on top of the new code with the same
-  observable behaviour, names, arguments, paths and settings. If upstream already does one of
-  these (same behaviour), drop that commit instead of duplicating it.
+- Keep every upstream change (Knulli's package patches included); re-express each fix on top
+  of the new code with the same observable behaviour, names, arguments, paths and settings. If
+  upstream already does one of these (same behaviour), drop that commit instead of duplicating
+  it.
 - No new network access, files, settings or dependencies. The result must build with the
   existing CMake options (GLES2, BATOCERA, KNULLI) and pass unit 07's API and UI tests.

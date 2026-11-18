@@ -2,7 +2,8 @@
 # Gate for unit 07: the rebased ES source passes unit 07's own API and UI tests headless.
 #   test_es_functional.sh ES_SOURCE UNIT07_TESTS OUT_DIR      (exit 0 pass, 1 fail, INFRA_EXIT)
 # As in 07's VALIDATION: a Debian-linked build of the same source (Mesa GLES2 under Xvfb; the
-# firmware build links the console's libmali and cannot run here), tests/setup.sh for a fake
+# firmware build links the console's libmali and cannot run here; Debian's SDL2 lacks Knulli's
+# joystick functions, so es-sdl-knulli.h stands in for them), tests/setup.sh for a fake
 # /userdata, then
 #   api_test.sh    POST /addgames with favorite=false, lastplayed=0 on a played favorite:
 #                  the game must come back favorite=false and not played (07 fix a);
@@ -29,6 +30,7 @@ cp -a /in/src/. /src/ && rm -rf /src/.git
 cd /build
 cmake /src -DGLES2=ON -DBATOCERA=ON -DKNULLI=ON -DDISABLE_KODI=ON -DENABLE_PULSE=OFF -DENABLE_TTS=OFF -DCEC=OFF \
 	-DENABLE_FILEMANAGER=OFF -DCMAKE_BUILD_TYPE=Release -DOPENGLES2_INCLUDE_DIR=/usr/include -DPYTHON3_EXECUTABLE=/bin/true \
+	"-DCMAKE_CXX_FLAGS=-include /tools/es-sdl-knulli.h -DES_SDL_KNULLI_STUBS" \
 	> /out/es-functional-cmake.log 2>&1 || { echo "cmake failed"; tail -20 /out/es-functional-cmake.log; exit 1; }
 (cd /src && python3 resources/checkWheelGunGamesResources.py) > /dev/null
 make -j"$(nproc)" > /out/es-functional-make.log 2>&1 || { echo "build failed"; tail -20 /out/es-functional-make.log; exit 1; }

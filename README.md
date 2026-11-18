@@ -8,7 +8,8 @@ Signed bundles of firmware-tied fixes for one Anbernic RG35XX-H running Knulli. 
 2. carries the fix series of
    [eduarbo/knulli-linux](https://github.com/eduarbo/knulli-linux) and
    [eduarbo/batocera-emulationstation](https://github.com/eduarbo/batocera-emulationstation)
-   (read over git; their Actions stay off) onto the new tag and the ES commit it pins: an
+   (read over git; their Actions stay off) onto the new tag and the ES it ships (the ES
+   commit it pins plus Knulli's ES package patches, applied as Buildroot does): an
    owner branch `knulli-<tag>-fixes`, else the resolved series of the last complete bundle
    (tag `series/<tag>`), else the original series; a conflict uses the reviewed patch files
    of `claude/resolution-<tag>` (written by a daily routine, read here as data only);

@@ -5,7 +5,12 @@
 #   build-es.sh IMAGE_GZ ES_SOURCE OUT_DIR
 #     IMAGE_GZ   knulli-h700-rg35xx-h-scarab-20260511.img.gz
 #                (sha256 c28a96f88b07e3adb4ea76b9874cd18ae177ec216bec2dac87c68795fb81291c)
-#     ES_SOURCE  checkout of the fork branch (4041b56 + patches) with submodules
+#     ES_SOURCE  checkout with submodules of the ES Scarab ships plus the fixes: 4041b56, then
+#                Knulli 20260511's package patches (knulli-linux
+#                package/emulationstation/knulli-emulationstation/*.patch, in name order, as
+#                Buildroot applies them), then the fork series. The pipeline's rebase.py leaves
+#                exactly that in WORK/es. A source without those patches is refused: ES would
+#                not pass -pNdevicepath and configgen's evmapy fails (PICO-8, MAME, GZDoom).
 #     OUT_DIR    receives emulationstation (stripped) and build logs
 #
 # Why this works: the binary is compiled with Debian 12 headers (GCC 12, glibc 2.36) and
@@ -13,12 +18,16 @@
 # GLIBC_2.34 / GLIBCXX_3.4.30 (Scarab ships glibc 2.40, libstdc++ 6.0.32) and the same
 # sonames as the stock /usr/bin/emulationstation. ScreenScraper/HfsDB developer keys are
 # not public, so those scrapers are missing from this build (TheGamesDB and ArcadeDB stay).
+# es-sdl-knulli.h declares the joystick functions of Knulli's SDL2 that the package patches
+# call (Debian's SDL2 headers lack them; the firmware's libSDL2 exports them).
 set -eu
 IMG=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 SRC=$(cd "$2" && pwd)
 OUT=$(mkdir -p "$3" && cd "$3" && pwd)
 HERE=$(cd "$(dirname "$0")" && pwd)
 NAME=knulli-es-build-$$
+grep -q '"devicepath "' "$SRC/es-core/src/InputManager.cpp" ||
+	{ echo "refused: $SRC lacks Knulli's ES package patches (no -pNdevicepath)"; exit 1; }
 
 docker run -d --name "$NAME" --tmpfs /t:size=3g -v "$IMG:/in/img.gz:ro" -v "$SRC:/src" \
 	-v "$HERE:/tools:ro" -v "$OUT:/out" debian:bookworm-slim sleep infinity
@@ -42,7 +51,7 @@ mkdir -p /sysroot/etc /sysroot/tmp && : > /sysroot/etc/ld.so.conf && ldconfig -r
 mkdir -p /build && cd /build
 cmake /src -DGLES2=ON -DBATOCERA=ON -DKNULLI=ON -DDISABLE_KODI=ON -DENABLE_PULSE=ON \
 	-DENABLE_TTS=ON -DCEC=OFF -DENABLE_FILEMANAGER=OFF -DCMAKE_BUILD_TYPE=Release \
-	-DCMAKE_CXX_FLAGS=-DH700 -DOPENGLES2_INCLUDE_DIR=/usr/include -DPYTHON3_EXECUTABLE=/bin/true \
+	"-DCMAKE_CXX_FLAGS=-DH700 -include /tools/es-sdl-knulli.h" -DOPENGLES2_INCLUDE_DIR=/usr/include -DPYTHON3_EXECUTABLE=/bin/true \
 	"-DCMAKE_LIBRARY_PATH=/sysroot/usr/lib;/sysroot/lib" \
 	"-DCMAKE_EXE_LINKER_FLAGS=-L/sysroot/usr/lib -L/sysroot/lib -Wl,-rpath-link,/sysroot/usr/lib:/sysroot/lib -Wl,--allow-shlib-undefined -Wl,--no-as-needed -lmali" \
 	> /out/cmake.log
