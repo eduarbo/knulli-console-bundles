@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:00:35 +0000
+Subject: [PATCH] Bind a game's image aspect ratio
+
+- {game:imageRatio}: the width of the game's image over its height (0
+  without one), read from the file's header once per file and size, so a
+  theme can lay out a portrait capture (two DS screens, a vertical arcade
+  game) apart from a landscape one.
+---
+ THEMES_BINDINGS.md      |  1 +
+ es-app/src/FileData.cpp | 21 +++++++++++++++++++++
+ es-app/src/FileData.h   |  3 +++
+ 3 files changed, 25 insertions(+)
+
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index 353c5a84..aedd034c 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -132,6 +132,7 @@ stars                       string                returns a string composed of r
+ nameShort                   string                name, before any parenthesis
+ nameExtra                   string                name, after any parenthesis
+ cleanName                   string                name without the trailing tags of dump sets: (USA), (En,Fr), (Rev 1), (v1.1), (Beta), [!]...; " : " as ": "
++imageRatio                  float                 the image's width over its height (4:3 is 1.33, a DS's two screens 0.67); 0 without an image
+ ```
+ 
+ **global:**
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index bd5c751a..de3c3658 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -33,6 +33,7 @@
+ #include "guis/GuiMsgBox.h"
+ #include "Paths.h"
+ #include "resources/TextureData.h"
++#include "ImageIO.h"
+ #include "QuickResume.h"
+ 
+ using namespace Utils::Platform;
+@@ -58,8 +59,28 @@ static std::map<std::string, std::function<BindableProperty(FileData*)>> propert
+ 	{ "genre",			    [](FileData* file) { return file->getGenre(); } },
+ 	{ "hasKeyboardMapping", [](FileData* file) { return file->hasKeyboardMapping(); } },	
+ 	{ "systemName",			[](FileData* file) { return file->getSourceFileData()->getSystem()->getFullName(); } },
++	{ "imageRatio",			[](FileData* file) { return FileData::getImageRatio(file->getImagePath()); } },
+ };
+ 
++// An image's width over its height (0 without one), read from its header once per file and size
++float FileData::getImageRatio(const std::string& path)
++{
++	if (path.empty())
++		return 0.0f;
++
++	static std::map<std::string, std::pair<size_t, float>> ratios;
++
++	size_t size = Utils::FileSystem::getFileSize(path);
++	auto it = ratios.find(path);
++	if (it != ratios.cend() && it->second.first == size)
++		return it->second.second;
++
++	unsigned int w = 0, h = 0;
++	float ratio = ImageIO::loadImageSize(path, &w, &h) && w > 0 && h > 0 ? (float)w / (float)h : 0.0f;
++	ratios[path] = std::make_pair(size, ratio);
++	return ratio;
++}
++
+ FileData* FileData::mRunningGame = nullptr;
+ 
+ FileData::FileData(FileType type, const std::string& path, SystemData* system)
+diff --git a/es-app/src/FileData.h b/es-app/src/FileData.h
+index 9ceeafc4..896a13c4 100644
+--- a/es-app/src/FileData.h
++++ b/es-app/src/FileData.h
+@@ -80,6 +80,9 @@ public:
+ 
+ 	static FileData* GetRunningGame() { return mRunningGame; }
+ 
++	// {game:imageRatio}: the game's image width over its height, 0 without one
++	static float getImageRatio(const std::string& path);
++
+ 	virtual const std::string& getName();
+ 
+ 	inline FileType getType() const { return mType; }

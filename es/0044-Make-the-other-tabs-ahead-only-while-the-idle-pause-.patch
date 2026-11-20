@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:22:56 +0000
+Subject: [PATCH] Make the other tabs ahead only while the idle pause holds the
+ home
+
+- The other tabs' extras were made 1.5 s after the last input, one system
+  per frame on the UI thread: the panel's video stuttered for a second or
+  two. They are now made only while the idle pause holds the home (its
+  videos ended their loop, its slides stopped) and no video of the shown
+  tab plays. Without the idle pause a tab's extras are made when it first
+  shows, and kept.
+---
+ es-app/src/views/SystemView.cpp | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index 43628b3b..57092bd0 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -229,15 +229,26 @@ void SystemView::loadExtras(SystemData* system)
+ 	SystemRandomPlaylist::resetCache();
+ }
+ 
+-static const unsigned int PREPARE_AFTER_IDLE_MS = 1500;
+-
+-// Tabs: once the home is idle (no input for a while), the extras of the other tabs' systems are made ahead,
+-// one system per frame, and kept for their tab (mParkedExtras): a tab then shows without making them
++// Tabs: while the idle pause holds the home (its videos ended their loop, its slides stopped), the extras of
++// the other tabs' systems are made ahead, one system per frame, and kept for their tab (mParkedExtras): a tab
++// then shows without making them. They are made on the UI thread, a tenth of a second or more each on a
++// handheld: with a video playing it would stutter.
+ void SystemView::prepareOtherTabs()
+ {
+-	if (!hasTabs() || mViewNeedsReload || mWindow->getTimeSinceLastInput() < PREPARE_AFTER_IDLE_MS || mWindow->peekGui() != ViewController::get())
++	if (!hasTabs() || mViewNeedsReload || mWindow->peekGui() != ViewController::get() ||
++		!mWindow->isIdlePaused(Window::IDLE_VIDEO) || !mWindow->isIdlePaused(Window::IDLE_SLIDES))
+ 		return;
+ 
++	for (auto& entry : mEntries)
++	{
++		bool playing = false;
++		for (auto extra : entry.backgroundExtras)
++			forEachVideo(extra, [&playing](VideoComponent* video) { if (video->isPlaying()) playing = true; });
++
++		if (playing)
++			return;
++	}
++
+ 	for (auto& tab : mTabs)
+ 	{
+ 		for (auto system : tab.systems)

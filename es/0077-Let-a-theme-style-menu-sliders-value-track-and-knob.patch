@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:46:00 +0000
+Subject: [PATCH] Let a theme style menu sliders' value, track and knob
+
+A menu slider drew its value in ES's own light font at the slider's
+height (about 7 px on a 480 px screen), a 2 px track in the text
+colour that did not show the level, and a knob 0.7 times the
+slider's height.
+
+menuSlider gains a font for the value, the track's colour and
+thickness, a fill colour for the track left of the knob, and the
+knob's size. Without them sliders are unchanged.
+---
+ THEMES.md                                  | 18 +++++++++++++++++-
+ es-core/src/ThemeData.cpp                  | 22 +++++++++++++++++++++-
+ es-core/src/ThemeData.h                    | 11 +++++++++++
+ es-core/src/components/SliderComponent.cpp | 22 +++++++++++++++++-----
+ 4 files changed, 66 insertions(+), 7 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 42505f0d..936d3928 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -830,7 +830,7 @@ ES versions with slides support the feature `slideshow`.
+ 	
+ * `menuSwitch name="menuswitch"` - PATHON | PATHOFF
+ 	- Images for the on/off switch in menus
+-* `menuSlider name="menuslider"` - PATH
++* `menuSlider name="menuslider"` - PATH | FONTPATH | FONTSIZE | TRACKCOLOR | FILLCOLOR | TRACKSIZE | KNOBSIZE
+ 	- Image for the slider knob in menus
+ * `menuButton name="menubutton"` - PATH | FILLEDPATH | CORNERSIZE | COLOR | FILLEDCOLOR | HEIGHT
+ 	- Images for menu buttons
+@@ -1506,6 +1506,22 @@ BATOCERA 5.24 - replace the button images in menus
+ * `height` - type: FLOAT.
+   - The buttons' least height, as a fraction of the screen height. Default: the label's height.
+ 
++#### menuSlider
++
++* `path` - type: PATH.
++  - The knob's image.
++* `fontPath` - type: PATH.
++* `fontSize` - type: FLOAT.
++  - The value's font. Default: ES's light font, as high as the slider.
++* `trackColor` - type: COLOR.
++  - The track's colour. Default: the menu text's colour.
++* `fillColor` - type: COLOR.
++  - The track's colour left of the knob. Default: as the rest of the track.
++* `trackSize` - type: FLOAT.
++  - The track's thickness, as a fraction of the screen height. Default is 2 pixels.
++* `knobSize` - type: FLOAT.
++  - The knob's height, as a fraction of the screen height. Default: 0.7 times the slider's height.
++
+ #### menuTextEdit
+ 
+ BATOCERA 5.24 - replace the textbox background images in OSK
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 728afc98..15ec3942 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -714,7 +714,13 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "wordKeys", BOOLEAN },
+ 		{ "focusKeys", BOOLEAN } } },
+ 	{ "menuSlider",{
+-		{ "path", PATH } } },
++		{ "path", PATH },
++		{ "fontPath", PATH },
++		{ "fontSize", FLOAT },
++		{ "trackColor", COLOR },
++		{ "fillColor", COLOR },
++		{ "trackSize", FLOAT },
++		{ "knobSize", FLOAT } } },
+ 	{ "menuButton",{
+ 		{ "cornerSize", NORMALIZED_PAIR },
+ 		{ "path", PATH },
+@@ -2606,6 +2612,20 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 	if (elem && elem->has("path") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("path")))
+ 		Icons.knob = elem->get<std::string>("path");
+ 
++	if (elem)
++	{
++		if (elem->has("fontPath") || elem->has("fontSize"))
++			Slider.font = Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_SMALL), true);
++		if (elem->has("trackColor"))
++			Slider.trackColor = elem->get<unsigned int>("trackColor");
++		if (elem->has("fillColor"))
++			Slider.fillColor = elem->get<unsigned int>("fillColor");
++		if (elem->has("trackSize"))
++			Slider.trackSize = elem->get<float>("trackSize") * Renderer::getScreenHeight();
++		if (elem->has("knobSize"))
++			Slider.knobSize = elem->get<float>("knobSize") * Renderer::getScreenHeight();
++	}
++
+ 	
+ 	elem = theme->getElement("menu", "menuicons", "menuIcons");
+ 	if (elem)
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index 087c32cf..5e6d2ef5 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -194,6 +194,16 @@ struct PromptElement
+ 	unsigned int color;
+ };
+ 
++// Menu sliders' value and track (menuSlider)
++struct SliderElement
++{
++	std::shared_ptr<Font> font;	// the value; nullptr: ES's light font as high as the slider
++	unsigned int trackColor;	// 0: the text's colour
++	unsigned int fillColor;		// the track left of the knob; 0: as the rest
++	float trackSize;			// pixels; 0: 2
++	float knobSize;				// pixels; 0: 0.7 times the slider's height
++};
++
+ // The text field of the on-screen keyboard and of other text popups (menuTextEdit)
+ struct TextEditElement
+ {
+@@ -243,6 +253,7 @@ public:
+ 		IconElement Icons { ":/on.svg", ":/off.svg", ":/auto.svg", ":/option_arrow.svg", ":/arrow.svg", ":/slider_knob.svg", ":/textinput_ninepatch.png", ":/textinput_ninepatch_active.png" };
+ 		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16), 0, 0, 0.0f };
+ 		TextEditElement TextEdit { nullptr, 0 };
++		SliderElement Slider { nullptr, 0, 0, 0.0f, 0.0f };
+ 		MenuRowElement Row { 0.0f, 10.0f, 0.0f, false, 0.0f };
+ 		PromptElement Prompt { "", nullptr, 0 };
+ 		bool FooterAtBottom = false;	// menufooter atBottom
+diff --git a/es-core/src/components/SliderComponent.cpp b/es-core/src/components/SliderComponent.cpp
+index 4588fab8..6a068e14 100644
+--- a/es-core/src/components/SliderComponent.cpp
++++ b/es-core/src/components/SliderComponent.cpp
+@@ -221,9 +221,19 @@ void SliderComponent::render(const Transform4x4f& parentTrans)
+ 
+ 	float width = mSize.x() - mKnob.getSize().x() - (mValueCache ? mValueCache->metrics.size.x() + 4 : 0);
+ 
+-	//render line
+-	const float lineWidth = 2;
+-	Renderer::drawRect(mKnob.getSize().x() / 2, mSize.y() / 2 - lineWidth / 2, width, lineWidth, getCurColor());
++	//render line (the theme's track and fill: menuSlider)
++	auto& slider = ThemeData::getMenuTheme()->Slider;
++	const float lineWidth = slider.trackSize > 0 ? Math::round(slider.trackSize) : 2;
++	const float lineY = Math::round(mSize.y() / 2 - lineWidth / 2);
++	unsigned int trackColor = slider.trackColor ? Utils::HtmlColor::applyColorOpacity(slider.trackColor, getOpacity()) : getCurColor();
++	Renderer::drawRect(mKnob.getSize().x() / 2, lineY, width, lineWidth, trackColor);
++
++	if (slider.fillColor && !(mIsAutoMode && getAuto()))
++	{
++		float fill = mKnob.getPosition().x() - mKnob.getSize().x() / 2;
++		if (fill > 0)
++			Renderer::drawRect(mKnob.getSize().x() / 2, lineY, fill, lineWidth, Utils::HtmlColor::applyColorOpacity(slider.fillColor, getOpacity()));
++	}
+ 
+ 	//render knob
+ 	mKnob.render(trans);
+@@ -264,7 +274,8 @@ float SliderComponent::getValue()
+ void SliderComponent::onSizeChanged()
+ {
+ 	GuiComponent::onSizeChanged();
+-	mFont = Font::get((int)(mSize.y()), FONT_PATH_LIGHT);
++	auto font = ThemeData::getMenuTheme()->Slider.font;
++	mFont = font ? font : Font::get((int)(mSize.y()), FONT_PATH_LIGHT);
+ 	onValueChanged();
+ }
+ 
+@@ -318,7 +329,8 @@ void SliderComponent::onValueChanged()
+ 		mValueCache->metrics.size[0] = textSize.x(); // fudge the width
+ 	}
+ 
+-	mKnob.setResize(0, mSize.y() * 0.7f);
++	float knobSize = ThemeData::getMenuTheme()->Slider.knobSize;
++	mKnob.setResize(0, knobSize > 0 ? knobSize : mSize.y() * 0.7f);
+ 	float lineLength = mSize.x() - mKnob.getSize().x() - (mValueCache ? mValueCache->metrics.size.x() + 4 : 0);
+ 
+ 	if (mIsAutoMode && getAuto())

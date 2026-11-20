@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 03:24:19 +0000
+Subject: [PATCH] Read the render thread's id atomically
+
+- The render thread's id is written at each window's start (after a game)
+  while loader threads freeing a texture read it; it is now atomic.
+---
+ es-core/src/renderers/Renderer.cpp | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/es-core/src/renderers/Renderer.cpp b/es-core/src/renderers/Renderer.cpp
+index 035e023e..7c3fb1af 100644
+--- a/es-core/src/renderers/Renderer.cpp
++++ b/es-core/src/renderers/Renderer.cpp
+@@ -13,6 +13,7 @@
+ #include "utils/StringUtil.h"
+ 
+ #include <SDL.h>
++#include <atomic>
+ #include <deque>
+ #include <mutex>
+ #include <set>
+@@ -424,7 +425,8 @@ namespace Renderer
+ 
+ 	// GL and the frame cache live on the thread that made the window. A texture freed on another thread (the
+ 	// last reference to an image dropped by a loader) waits for it.
+-	static std::thread::id           renderThread;
++	// Written at each window's start, read by loader threads freeing a texture
++	static std::atomic<std::thread::id> renderThread;
+ 	static std::mutex                pendingLock;
+ 	static std::vector<unsigned int> pendingTextures;
+ 
+@@ -432,7 +434,7 @@ namespace Renderer
+ 
+ 	bool init()
+ 	{
+-		renderThread = std::this_thread::get_id();
++		renderThread.store(std::this_thread::get_id());
+ 		{
+ 			// The textures of an earlier window went with its context
+ 			std::unique_lock<std::mutex> lock(pendingLock);
+@@ -1263,7 +1265,7 @@ namespace Renderer
+ 
+ 	void  destroyTexture(const unsigned int _texture)
+ 	{
+-		if (std::this_thread::get_id() != renderThread)
++		if (std::this_thread::get_id() != renderThread.load())
+ 		{
+ 			std::unique_lock<std::mutex> lock(pendingLock);
+ 			pendingTextures.push_back(_texture);

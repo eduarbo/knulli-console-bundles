@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 15:00:52 +0000
+Subject: [PATCH] Stop a video its view shows off the screen
+
+A home with columns shows level 1 with the system's column panned off
+the screen, and its last played game's video went on playing there:
+heard, not seen, at level 1 and on every tab changed with L1/R1. A
+video can now be marked out of view: it stops as when its view is
+hidden, sound and all, and leaves its snapshot in its place while it
+is still drawn (the pan). The system view marks its extras' videos out
+of view at level 1 and back in view at level 2. "VideoCheck" also logs
+each video that starts or stops, with the count playing.
+---
+ es-app/src/views/SystemView.cpp              | 25 ++++++++++++++++++++
+ es-app/src/views/SystemView.h                |  2 ++
+ es-core/src/components/VideoComponent.cpp    |  4 ++--
+ es-core/src/components/VideoComponent.h      |  5 ++++
+ es-core/src/components/VideoVlcComponent.cpp | 13 ++++++----
+ 5 files changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index 47e80adb..b71d3b0d 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -241,6 +241,7 @@ void SystemView::loadExtras(SystemData* system)
+ 		it->backgroundExtras = extras;
+ 
+ 	SystemRandomPlaylist::resetCache();
++	showColumnVideos();
+ }
+ 
+ // Tabs: while the idle pause holds the home (its videos ended their loop, its slides stopped), the extras of
+@@ -1382,9 +1383,33 @@ void SystemView::showColumnLevel(int level)
+ 	if (grid != nullptr)
+ 		grid->setCursorShown(level == 2);
+ 
++	showColumnVideos();
+ 	updateExtraTextBinding();
+ }
+ 
++void SystemView::showColumnVideos()
++{
++	bool inView = !hasColumns() || mColumnLevel == 2;
++
++	std::function<void(GuiComponent*)> mark = [&mark, inView](GuiComponent* component)
++	{
++		VideoComponent* video = dynamic_cast<VideoComponent*>(component);
++		if (video != nullptr)
++			video->setInView(inView);
++
++		for (unsigned int i = 0; i < component->getChildCount(); i++)
++			mark(component->getChild(i));
++	};
++
++	for (auto& entry : mEntries)
++		for (auto extra : entry.backgroundExtras)
++			mark(extra);
++
++	for (auto& parked : mParkedExtras)
++		for (auto extra : parked.second)
++			mark(extra);
++}
++
+ std::vector<HelpPrompt> SystemView::getHelpPrompts()
+ {
+ 	std::vector<HelpPrompt> prompts = mCarousel.getHelpPrompts();
+diff --git a/es-app/src/views/SystemView.h b/es-app/src/views/SystemView.h
+index 98a50b29..08b7f22d 100644
+--- a/es-app/src/views/SystemView.h
++++ b/es-app/src/views/SystemView.h
+@@ -137,6 +137,8 @@ private:
+ 	void	 moveTab(int direction, bool wrap = true);
+ 
+ 	void	 showColumnLevel(int level);
++	// The extras' videos play at level 2 only: at level 1 the system's column is off the screen
++	void	 showColumnVideos();
+ 	void	 renderExtra(GuiComponent* extra, const Transform4x4f& trans);
+ 	void	 renderInPlace(const Transform4x4f& screen, ColumnLayout::Role role);
+ 	ColumnLayout::Role columnRole(GuiComponent* extra);
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 51301720..8b0c5df3 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -255,7 +255,7 @@ void VideoComponent::renderSnapshot(const Transform4x4f& parentTrans)
+ {
+ 	// Out of view (a view still drawn while it slides away, or before it is shown), the stopped video leaves its
+ 	// snapshot in its place instead of a hole
+-	if (!isShowing() && !mIsPlaying && !mIsWaitingForVideoToStart && !isPaused() && (mConfig.showSnapshotNoVideo || mConfig.showSnapshotDelay))
++	if ((!isShowing() || !mInView) && !mIsPlaying && !mIsWaitingForVideoToStart && !isPaused() && (mConfig.showSnapshotNoVideo || mConfig.showSnapshotDelay))
+ 	{
+ 		if (!mStaticImage.isStoryBoardRunning("snapshot"))
+ 		{
+@@ -544,7 +544,7 @@ void VideoComponent::manageState()
+ 
+ 	// We will only show if the component is on display and the screensaver
+ 	// is not active
+-	bool show = isShowing() && !mScreensaverActive && mIsTopWindow && mVisible && mEnabled;
++	bool show = isShowing() && mInView && !mScreensaverActive && mIsTopWindow && mVisible && mEnabled;
+ 	if (!show)
+ 		mStartDelayed = false;
+ 
+diff --git a/es-core/src/components/VideoComponent.h b/es-core/src/components/VideoComponent.h
+index d42b2cc0..3eed3634 100644
+--- a/es-core/src/components/VideoComponent.h
++++ b/es-core/src/components/VideoComponent.h
+@@ -93,6 +93,10 @@ public:
+ 	// (ScreenShape::fit)
+ 	void setKeepOrientation(bool keep) { mKeepOrientation = keep; }
+ 
++	// Off the screen though its view shows (a column panned away): it stops, sound and all, as when hidden
++	void setInView(bool inView) { mInView = inView; }
++	bool isInView() const { return mInView; }
++
+ 	// Resize the video to be as large as possible but fit within a box of this size.
+ 	// Can be set before or after a video is loaded.
+ 	// Never breaks the aspect ratio. setMaxSize() and setResize() are mutually exclusive.
+@@ -226,6 +230,7 @@ protected:
+ 	bool							mTargetIsMax;
+ 	bool							mTargetIsMin;
+ 	bool							mKeepOrientation;
++	bool							mInView = true;
+ 
+ 	bool							mIsWaitingForVideoToStart;
+ 
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 95a07b23..9d3ff28e 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -322,13 +322,18 @@ static void videoShown(VideoVlcComponent* video, bool shown)
+ {
+ 	if (!shown)
+ 	{
+-		sShownVideos.erase(video);
++		if (sShownVideos.erase(video) > 0)
++			LOG(LogInfo) << "VideoCheck: " << sShownVideos.size() << (sShownVideos.size() == 1 ? " video plays" : " videos play");
+ 		return;
+ 	}
+ 
+-	sShownVideos.insert(video);
++	bool added = sShownVideos.insert(video).second;
+ 	if (sShownVideos.size() < 2)
++	{
++		if (added)
++			LOG(LogInfo) << "VideoCheck: 1 video plays: " << video->getVideoPath();
+ 		return;
++	}
+ 
+ 	std::string paths;
+ 	for (auto v : sShownVideos)
+@@ -693,8 +698,8 @@ void VideoVlcComponent::render(const Transform4x4f& parentTrans)
+ 	if (!isVisible())
+ 		return;
+ 
+-	// Out of view but drawn (a view sliding away or in): its snapshot, not the stopped player
+-	if (!isShowing())
++	// Out of view but drawn (a view sliding away or in, a column panning away): its snapshot, not the stopped player
++	if (!isShowing() || !mInView)
+ 	{
+ 		VideoComponent::render(parentTrans);
+ 		return;

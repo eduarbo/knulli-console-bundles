@@ -1,0 +1,540 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 04:20:40 +0000
+Subject: [PATCH] Cycle cards and consoles in the column browser with page and
+ letter navigation
+
+---
+ es-app/src/SystemData.cpp                     |   7 ++
+ es-app/src/views/SystemView.cpp               |  83 +++++++++++--
+ es-app/src/views/SystemView.h                 |   3 +
+ es-app/src/views/ViewController.cpp           |  10 ++
+ .../src/views/gamelist/GridGameListView.cpp   | 117 ++++++++++++++++--
+ es-app/src/views/gamelist/GridGameListView.h  |  13 ++
+ es-core/src/components/IList.h                |   8 +-
+ es-core/src/components/ImageGridComponent.h   |  22 ++++
+ 8 files changed, 237 insertions(+), 26 deletions(-)
+
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 36c4766f..24bd8c24 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -2549,6 +2549,13 @@ BindableProperty SystemData::getProperty(const std::string& name)
+ 		}
+ 	}
+ 
++	if (name == "prevTab" || name == "nextTab")
++		return SystemView::adjacentTabName(this, name == "prevTab" ? -1 : 1);
++	if (name == "prevConsole" || name == "nextConsole")
++	{
++		auto target = SystemView::adjacentConsole(this, name == "prevConsole" ? -1 : 1);
++		return target ? target->getFullName() : std::string();
++	}
+ 	if (name == "tab")
+ 		return SystemView::getSystemTab(this);
+ 
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index d2d8226b..f0f20fb5 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -34,6 +34,11 @@
+ #include <SDL_timer.h>
+ 
+ std::map<std::string, int> SystemView::sSystemTabs;
++namespace
++{
++	std::vector<SystemData*> consoleOrder;
++	std::vector<std::pair<std::string, std::string>> tabNeighbors;
++}
+ int SystemView::sShownColumn = 0;
+ 
+ // The pan between a column layout's first column and its grid, eased out: it moves in the frame after the
+@@ -445,7 +450,7 @@ void SystemView::populate(bool keepExtras)
+ 	if (hasColumns())
+ 	{
+ 		if (mColumnPanTime < 0)
+-			mColumnPan = mColumnLevel == 2 ? mColumns.pan : 0;
++			mColumnPan = columnPanTarget(mColumnLevel);
+ 
+ 		if (sShownColumn == 0)
+ 			showColumnLevel(mColumnLevel);
+@@ -612,14 +617,26 @@ bool SystemView::input(InputConfig* config, Input input)
+ 		return true;
+ 	}
+ 
+-	// Columns: at level 1 up and down change the tab and right or A give the grid the focus; at level 2 B or
+-	// left at the grid's left edge give it back, right at its right edge opens the system's games (as A does)
++	// Right enters the category rail's selection. On cards, horizontal input
++	// stays in this grid and wraps, including repeated input across both ends.
++	if (hasColumns() && mColumnLevel == 2 && mCarousel.asGrid() &&
++	    mCarousel.asGrid()->cycleCardInput(config, input))
++		return true;
+ 	if (hasColumns() && input.value != 0)
+ 	{
+ 		auto grid = mCarousel.asGrid();
+ 
+ 		if (mColumnLevel == 1)
+ 		{
++			if (grid && (config->isMappedTo("l2", input) || config->isMappedTo("r2", input)))
++			{
++				if (grid->canPageRows())
++				{
++					setColumnLevel(2, true);
++					grid->pageRows(config->isMappedTo("l2", input) ? -1 : 1);
++				}
++				return true;
++			}
+ 			if (config->isMappedLike("up", input))
+ 			{
+ 				moveTab(-1, false);
+@@ -643,18 +660,17 @@ bool SystemView::input(InputConfig* config, Input input)
+ 		}
+ 		else if (grid != nullptr)
+ 		{
+-			if (config->isMappedTo(BUTTON_BACK, input) || (config->isMappedLike("left", input) && grid->getCursorColumn() == 0))
++			if (config->isMappedTo("l2", input) || config->isMappedTo("r2", input))
+ 			{
+-				setColumnLevel(1, true);
++				grid->pageRows(config->isMappedTo("l2", input) ? -1 : 1);
+ 				return true;
+ 			}
+-
+-			if (config->isMappedLike("right", input) && (grid->getCursorColumn() == grid->getColumnCount() - 1 || mCarousel.getCursorIndex() == mCarousel.size() - 1))
++			if (config->isMappedTo(BUTTON_BACK, input))
+ 			{
+-				mCarousel.stopScrolling();
+-				ViewController::get()->goToGameList(getSelected());
++				setColumnLevel(1, true);
+ 				return true;
+ 			}
++
+ 		}
+ 	}
+ 
+@@ -1052,6 +1068,10 @@ void SystemView::onCursorChanged(const CursorState& state)
+ 
+ 	int mCursor = mCarousel.getCursorIndex();
+ 
++	if (hasColumns() && mColumnLevel == 2 &&
++	    columnPanTarget(2) != (mColumnPanTime < 0 ? mColumnPan : mColumnPanTo))
++		setColumnLevel(2, true);
++
+ 	if (AudioManager::isInitialized())
+ 		AudioManager::getInstance()->changePlaylist(getSelected()->getTheme());
+ 
+@@ -1362,13 +1382,21 @@ bool SystemView::hasColumns()
+ 	return mColumns.pan > 0 && hasTabs();
+ }
+ 
++float SystemView::columnPanTarget(int level)
++{
++	if (level != 2 || mCarousel.size() == 0)
++		return 0;
++	auto theme = getSelected()->getTheme();
++	return theme && theme->getVariable("esColumnKeepTabs") == "true" ? 0 : mColumns.pan;
++}
++
+ void SystemView::setColumnLevel(int level, bool animate)
+ {
+ 	if (!hasColumns())
+ 		return;
+ 
+ 	level = level == 2 ? 2 : 1;
+-	float target = level == 2 ? mColumns.pan : 0;
++	float target = columnPanTarget(level);
+ 
+ 	mColumnLevel = level;
+ 
+@@ -1614,6 +1642,8 @@ bool SystemView::buildTabs()
+ {
+ 	mTabs.clear();
+ 	sSystemTabs.clear();
++	consoleOrder.clear();
++	tabNeighbors.clear();
+ 
+ 	if (mTabDefinition.empty() || !mCarousel.isGrid())
+ 		return false;
+@@ -1683,6 +1713,23 @@ bool SystemView::buildTabs()
+ 		return false;
+ 	}
+ 
++	// Navigation and its labels share the same order of visible, nonempty tabs.
++	std::vector<int> filled;
++	const std::string excludedTab = mGridTheme ? mGridTheme->getVariable("esConsoleCycleSkipTab") : "";
++	for (size_t i = 0; i < mTabs.size(); ++i)
++	{
++		if (mTabs[i].systems.empty()) continue;
++		filled.push_back(static_cast<int>(i));
++		if (mTabs[i].name == excludedTab) continue;
++		for (auto system : mTabs[i].systems)
++			if (system->isGameSystem() && !system->isCollection())
++				consoleOrder.push_back(system);
++	}
++	tabNeighbors.resize(mTabs.size());
++	for (size_t i = 0; i < filled.size(); ++i)
++		tabNeighbors[filled[i]] = {mTabs[filled[(i + filled.size() - 1) % filled.size()]].name,
++			mTabs[filled[(i + 1) % filled.size()]].name};
++
+ 	if (mActiveTab < 0 || mActiveTab >= (int)mTabs.size() || mTabs[mActiveTab].systems.empty())
+ 		mActiveTab = firstFilled;
+ 
+@@ -1694,6 +1741,22 @@ bool SystemView::hasTabs()
+ 	return !mTabs.empty() && mCarousel.isGrid();
+ }
+ 
++SystemData* SystemView::adjacentConsole(SystemData* system, int direction)
++{
++	if (consoleOrder.empty()) return nullptr;
++	auto it = std::find(consoleOrder.begin(), consoleOrder.end(), system);
++	if (it == consoleOrder.end()) return direction < 0 ? consoleOrder.back() : consoleOrder.front();
++	const int count = static_cast<int>(consoleOrder.size());
++	return consoleOrder[(static_cast<int>(it - consoleOrder.begin()) + direction + count) % count];
++}
++
++std::string SystemView::adjacentTabName(SystemData* system, int direction)
++{
++	int tab = getSystemTab(system);
++	if (tab < 0 || tab >= static_cast<int>(tabNeighbors.size())) return "";
++	return direction < 0 ? tabNeighbors[tab].first : tabNeighbors[tab].second;
++}
++
+ int SystemView::getSystemTab(SystemData* system)
+ {
+ 	if (system == nullptr)
+diff --git a/es-app/src/views/SystemView.h b/es-app/src/views/SystemView.h
+index 08b7f22d..5e9d0f48 100644
+--- a/es-app/src/views/SystemView.h
++++ b/es-app/src/views/SystemView.h
+@@ -79,6 +79,8 @@ public:
+ 
+ 	// The index of the tab that shows a system, in the theme's "systemtabs" order; -1 without tabs
+ 	static int getSystemTab(SystemData* system);
++	static SystemData* adjacentConsole(SystemData* system, int direction);
++	static std::string adjacentTabName(SystemData* system, int direction);
+ 
+ 	// Binds the selected system's extras again (its counts or last game changed)
+ 	void refreshBindings() { updateExtraTextBinding(); }
+@@ -87,6 +89,7 @@ public:
+ 	// the grid. The view pans between them; a game list opens beside level 2.
+ 	bool	hasColumns();
+ 	int		getColumnLevel() { return mColumnLevel; }
++	float columnPanTarget(int level);
+ 	void	setColumnLevel(int level, bool animate);
+ 	// L1 or R1 from a game list: the previous or next tab
+ 	void	changeTab(int direction) { if (hasTabs()) moveTab(direction); }
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index bd9b4e75..dcb26fbf 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -269,6 +269,11 @@ void ViewController::goToGameList(SystemData* system, bool forceImmediate)
+ 		}
+ 	}
+ 
++	// Direct boot into a column list needs the same tab destinations as entry from Home.
++	if (!mSystemListView && destinationSystem->getTheme() &&
++	    !destinationSystem->getTheme()->getVariable("esColumnPan").empty())
++		getSystemListView();
++
+ 	std::shared_ptr<IGameListView> view = getGameListView(destinationSystem);
+ 
+ 	bool fromHome = mState.viewing == SYSTEM_SELECT;
+@@ -1033,6 +1038,11 @@ bool ViewController::input(InputConfig* config, Input input)
+ 		return true;
+ 	}
+ 
++	if (mState.viewing == GAME_LIST)
++	{
++		auto grid = dynamic_cast<GridGameListView*>(mCurrentView.get());
++		if (grid && grid->handleLetterAxis(config, input)) return true;
++	}
+ 	if (config->isMappedTo("joystick2up", input) && input.value != 0)
+ 	{
+ 		changeVolume(5);
+diff --git a/es-app/src/views/gamelist/GridGameListView.cpp b/es-app/src/views/gamelist/GridGameListView.cpp
+index 08fdd94f..b01fbd32 100644
+--- a/es-app/src/views/gamelist/GridGameListView.cpp
++++ b/es-app/src/views/gamelist/GridGameListView.cpp
+@@ -12,12 +12,14 @@
+ #include "SystemConf.h"
+ #include "guis/GuiGamelistOptions.h"
+ #include "GameNameFormatter.h"
++#include "FileSorts.h"
+ #include "utils/Randomizer.h"
+ 
+ GridGameListView::GridGameListView(Window* window, FolderData* root, const std::shared_ptr<ThemeData>& theme, std::string themeName, Vector2f gridSize) :
+ 	ISimpleGameListView(window, root),
+ 	mGrid(window),
+-	mDetails(this, &mGrid, mWindow, DetailedContainer::GridView)
++	mDetails(this, &mGrid, mWindow, DetailedContainer::GridView),
++	mLetterLabel(window)
+ {
+ 	// Let DetailedContainer handle extras with activation scripts
+ 	mExtraMode = ThemeData::ExtraImportType::WITHOUT_ACTIVATESTORYBOARD;
+@@ -33,6 +35,16 @@ GridGameListView::GridGameListView(Window* window, FolderData* root, const std::
+ 	mGrid.setDefaultZIndex(20);
+ 	mGrid.setCursorChangedCallback([&](const CursorState& /*state*/) { updateInfoPanel(); });
+ 	addChild(&mGrid);
++	mLetterLabel.setFont(Font::get(FONT_SIZE_MEDIUM));
++	mLetterLabel.setColor(0xf3f4fcff);
++	mLetterLabel.setBackgroundColor(0x181f35ef);
++	mLetterLabel.setRenderBackground(true);
++	mLetterLabel.setHorizontalAlignment(ALIGN_CENTER);
++	mLetterLabel.setSize(mSize.x() * 0.075f, mSize.y() * 0.075f);
++	mLetterLabel.setPosition(mSize.x() * 0.90f, mSize.y() * 0.085f);
++	mLetterLabel.setZIndex(150);
++	mLetterLabel.setVisible(false);
++	addChild(&mLetterLabel);
+ 	
+ 	if (!themeName.empty())
+ 		setThemeName(themeName);
+@@ -110,23 +122,25 @@ bool GridGameListView::input(InputConfig* config, Input input)
+ 	}
+ 	*/
+ 
+-	// Columns (the home slides in beside the list): left at the grid's left edge goes back as B does, L1 and R1
+-	// go back to the previous or next tab of the home
+-	if (input.value != 0 && mColumns.hasSlide() && !mPopupSelfReference && mCursorStack.empty())
++	if (mColumns.hasSlide() && !mPopupSelfReference &&
++	    (config->isMappedTo("l2", input) || config->isMappedTo("r2", input)))
++	{
++		if (input.value) mGrid.pageRows(config->isMappedTo("l2", input) ? -1 : 1);
++		return true;
++	}
++
++	if (mColumns.hasSlide() && !mPopupSelfReference && mGrid.cycleCardInput(config, input))
++		return true;
++	// Shoulders change console; A opens an item and B returns.
++	if (input.value != 0 && mColumns.hasSlide() && !mPopupSelfReference)
+ 	{
+ 		auto home = ViewController::get()->getSystemListView();
+ 		if (home->hasColumns())
+ 		{
+-			if (config->isMappedLike("left", input) && mGrid.getCursorColumn() == 0)
+-			{
+-				goBack();
+-				return true;
+-			}
+-
+ 			if (config->isMappedTo("pageup", input) || config->isMappedTo("pagedown", input))
+ 			{
+-				goBack();
+-				home->changeTab(config->isMappedTo("pageup", input) ? -1 : 1);
++				auto dest = SystemView::adjacentConsole(mRoot->getSystem(), config->isMappedTo("pageup", input) ? -1 : 1);
++				if (dest) ViewController::get()->goToGameList(dest);
+ 				return true;
+ 			}
+ 		}
+@@ -168,7 +182,10 @@ void GridGameListView::populateList(const std::vector<FileData*>& files)
+ 	updateHeaderLogoAndText();
+ 
+ 	mGrid.resetLastCursor();
+-	mGrid.clear(); 
++	mGrid.clear();
++	mLetterStarts.clear();
++	mLetterBuild = {};
++	mLetterDirection = 0;
+ 	mGrid.resetLastCursor();
+ 
+ 	if (files.size() > 0)
+@@ -212,6 +229,7 @@ void GridGameListView::populateList(const std::vector<FileData*>& files)
+ 			mGrid.add(". .", imagePath, createParentFolderData());
+ 		}
+ 
++		indexLetters(files, mGrid.size());
+ 		GameNameFormatter formatter(mRoot->getSystem());
+ 
+ 		for (auto file : files)
+@@ -319,8 +337,81 @@ std::vector<FileData*> GridGameListView::getFileDataEntries()
+ 	return mGrid.getObjects();
+ }
+ 
++void GridGameListView::indexLetters(const std::vector<FileData*>& files, int offset)
++{
++	const auto sort = mRoot->getSystem()->getSortId();
++	if (!mColumns.hasSlide() || sort > FileSorts::FILENAME_DESCENDING) return;
++	std::vector<std::string> names;
++	names.reserve(files.size());
++	for (auto* file : files) names.push_back(file->getName());
++	const auto articles = Settings::IgnoreLeadingArticles() ? Utils::String::commaStringToVector(_("A,AN,THE")) : std::vector<std::string>();
++	// The worker owns its snapshot. Reloading a list can destroy FileData objects.
++	mLetterBuild = std::async(std::launch::async, [offset, articles](std::vector<std::string> names) {
++		LetterStarts result;
++		for (size_t i = 0; i < names.size(); ++i)
++		{
++			const auto name = articles.empty() ? names[i] : FileSorts::stripLeadingArticle(names[i], articles);
++			if (name.empty()) continue;
++			const auto first = name.substr(0, Utils::String::nextCursor(name, 0));
++			const auto letter = first.size() == 1 && first[0] >= '0' && first[0] <= '9' ? "#" : Utils::String::toUpper(first);
++			if (result.empty() || result.back().second != letter)
++				result.emplace_back(offset + int(i), letter);
++		}
++		return result;
++	}, std::move(names));
++}
++
++void GridGameListView::jumpLetter(int direction)
++{
++	if (mLetterBuild.valid() && mLetterBuild.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
++		mLetterStarts = mLetterBuild.get();
++	if (mLetterStarts.empty()) return;
++	auto after = std::upper_bound(mLetterStarts.begin(), mLetterStarts.end(), mGrid.getCursorIndex(),
++		[](int index, const LetterStarts::value_type& start) { return index < start.first; });
++	const int count = int(mLetterStarts.size());
++	const int current = int(after - mLetterStarts.begin()) - 1;
++	const auto& target = mLetterStarts[(current + direction + count * 2) % count];
++	mGrid.setCursorIndex(target.first);
++	mLetterLabel.setText(target.second);
++	mLetterLabel.setVisible(true);
++	mLetterLabel.setOpacity(255);
++	mLetterDisplay = 720;
++}
++
++bool GridGameListView::handleLetterAxis(InputConfig* config, Input input)
++{
++	if (!mColumns.hasSlide() || mPopupSelfReference || mRoot->getSystem()->getSortId() > FileSorts::FILENAME_DESCENDING)
++		return false;
++	const bool up = config->isMappedTo("joystick2up", input);
++	if (!up && !config->isMappedTo("joystick2up", input, true)) return false;
++	mLetterDirection = input.value == 0 ? 0 : (up ? -1 : 1);
++	if (mLetterDirection) jumpLetter(mLetterDirection);
++	mLetterRepeat = 400;
++	return true;
++}
++
++void GridGameListView::onHide()
++{
++	mLetterDirection = 0;
++	mLetterDisplay = 0;
++	mLetterLabel.setVisible(false);
++	ISimpleGameListView::onHide();
++}
++
+ void GridGameListView::update(int deltaTime)
+ {
++	if (mWindow->peekGui() != ViewController::get()) mLetterDirection = 0;
++	if (mLetterDirection && (mLetterRepeat -= deltaTime) <= 0)
++	{
++		jumpLetter(mLetterDirection);
++		mLetterRepeat = 180;
++	}
++	if (mLetterDisplay > 0)
++	{
++		mLetterDisplay = std::max(0, mLetterDisplay - deltaTime);
++		mLetterLabel.setOpacity(std::min(255, mLetterDisplay * 2));
++		mLetterLabel.setVisible(mLetterDisplay > 0);
++	}
+ 	mDetails.update(deltaTime);
+ 	ISimpleGameListView::update(deltaTime);
+ }
+diff --git a/es-app/src/views/gamelist/GridGameListView.h b/es-app/src/views/gamelist/GridGameListView.h
+index 2e072bf7..e5a5ae66 100644
+--- a/es-app/src/views/gamelist/GridGameListView.h
++++ b/es-app/src/views/gamelist/GridGameListView.h
+@@ -8,6 +8,8 @@
+ #include "views/gamelist/ISimpleGameListView.h"
+ #include "views/gamelist/BasicGameListView.h"
+ #include "DetailedContainer.h"
++#include "components/TextComponent.h"
++#include <future>
+ 
+ class VideoComponent;
+ 
+@@ -24,6 +26,8 @@ public:
+ 	virtual void setCursorIndex(int index) override; 
+ 	virtual void resetLastCursor() override;
+ 	virtual void moveToRandomGame() override;
++	bool handleLetterAxis(InputConfig* config, Input input);
++	void onHide() override;
+ 	virtual bool onMouseWheel(int delta) override;
+ 
+ 	virtual bool input(InputConfig* config, Input input) override;
+@@ -57,6 +61,15 @@ protected:
+ 
+ private:
+ 	DetailedContainerHost mDetails;
++	using LetterStarts = std::vector<std::pair<int, std::string>>;
++	std::future<LetterStarts> mLetterBuild;
++	LetterStarts mLetterStarts;
++	TextComponent mLetterLabel;
++	int mLetterDirection = 0;
++	int mLetterRepeat = 0;
++	int mLetterDisplay = 0;
++	void jumpLetter(int direction);
++	void indexLetters(const std::vector<FileData*>& files, int offset);
+ 
+ 	void updateInfoPanel();
+ 	const std::string getImagePath(FileData* file);
+diff --git a/es-core/src/components/IList.h b/es-core/src/components/IList.h
+index f18a863b..985de354 100644
+--- a/es-core/src/components/IList.h
++++ b/es-core/src/components/IList.h
+@@ -83,6 +83,7 @@ protected:
+ 
+ 	const ScrollTierList& mTierList;
+ 	const ListLoopType mLoopType;
++	bool mWrapSingleSteps = false;
+ 
+ 	std::vector<Entry> mEntries;
+ 	
+@@ -263,8 +264,9 @@ protected:
+ 	}
+ 
+ 
+-	bool listInput(int velocity) // a velocity of 0 = stop scrolling
++	bool listInput(int velocity, bool wrapSingleSteps = false) // a velocity of 0 = stop scrolling
+ 	{
++		mWrapSingleSteps = wrapSingleSteps;
+ 		PowerSaver::lock(velocity == 0);
+ 
+ 		bool sendCursorChanged = false;
+@@ -383,8 +385,8 @@ protected:
+ 		// stop at the end if we've been holding down the button for a long time or
+ 		// we're scrolling faster than one item at a time (e.g. page up/down)
+ 		// otherwise, loop around
+-		if((mLoopType == LIST_PAUSE_AT_END && (mScrollTier > 0 || absAmt > 1)) ||
+-			mLoopType == LIST_NEVER_LOOP)
++		if (!(mWrapSingleSteps && absAmt == 1) &&
++			((mLoopType == LIST_PAUSE_AT_END && (mScrollTier > 0 || absAmt > 1)) || mLoopType == LIST_NEVER_LOOP))
+ 		{
+ 			if(cursor < 0)
+ 			{
+diff --git a/es-core/src/components/ImageGridComponent.h b/es-core/src/components/ImageGridComponent.h
+index 5c6dfc1b..acdd2896 100644
+--- a/es-core/src/components/ImageGridComponent.h
++++ b/es-core/src/components/ImageGridComponent.h
+@@ -149,6 +149,16 @@ public:
+ 	// The cursor's column and the number of columns (rows of a horizontal grid)
+ 	int			getCursorColumn();
+ 	int			getColumnCount();
++	bool cycleCardInput(InputConfig* config, Input input)
++	{
++		bool left = config->isMappedLike("left", input);
++		if (!left && !config->isMappedLike("right", input)) return false;
++		listInput(input.value ? (left ? -1 : 1) : 0, true);
++		return true;
++	}
++	int pageRowCount() { return std::max(1, (isVertical() ? mGridDimension.y() : mGridDimension.x()) - 2 * EXTRAITEMS); }
++	bool canPageRows() { return static_cast<int>(mEntries.size()) > getColumnCount() * pageRowCount(); }
++	void pageRows(int direction);
+ 
+ protected:
+ 	virtual void onCursorChanged(const CursorState& state) override;
+@@ -1771,6 +1781,18 @@ int ImageGridComponent<T>::getColumnCount()
+ 	return Math::max(1, isVertical() ? mGridDimension.x() : mGridDimension.y());
+ }
+ 
++template<typename T>
++void ImageGridComponent<T>::pageRows(int direction)
++{
++	if (mEntries.empty()) return;
++	const int columns = getColumnCount();
++	const int rows = pageRowCount();
++	const int column = mCursor % columns;
++	const int lastRow = (int(mEntries.size()) - 1 - column) / columns;
++	const int row = std::max(0, std::min(lastRow, mCursor / columns + direction * rows));
++	this->setCursorIndex(row * columns + column);
++}
++
+ template<typename T>
+ int ImageGridComponent<T>::getCursorColumn()
+ {

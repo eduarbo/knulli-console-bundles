@@ -1,0 +1,266 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:04:13 +0000
+Subject: [PATCH] Keep a tab's elements and make the other tabs' ahead when the
+ home is idle
+
+- A tab switch deleted every system's extras and made the next tab's again
+  from the theme; they are now kept for the tab's next show (hidden
+  meanwhile).
+- After 1.5 s without input, the extras of the other tabs' systems are made
+  ahead, one system per frame, so a first visit to a tab does not make them
+  either.
+---
+ es-app/src/views/SystemView.cpp | 123 ++++++++++++++++++++++++++------
+ es-app/src/views/SystemView.h   |  10 ++-
+ es-core/src/Window.h            |   1 +
+ 3 files changed, 112 insertions(+), 22 deletions(-)
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index f80f39fc..7e224cbb 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -78,14 +78,28 @@ SystemView::~SystemView()
+ 	clearEntries();
+ }
+ 
+-void SystemView::clearEntries()
++void SystemView::clearEntries(bool keepExtras)
+ {
++	if (!keepExtras)
++		clearParkedExtras();
++
+ 	for (auto& entry : mEntries)
+ 	{
+ 		setExtraRequired(entry, false);
+ 
+-		for (auto extra : entry.backgroundExtras)
+-			delete extra;
++		if (keepExtras)
++		{
++			// Hidden (videos stop, slideshows go back to their first capture) until the tab shows again
++			for (auto extra : entry.backgroundExtras)
++				extra->onHide();
++
++			mParkedExtras[entry.object] = entry.backgroundExtras;
++		}
++		else
++		{
++			for (auto extra : entry.backgroundExtras)
++				delete extra;
++		}
+ 
+ 		entry.backgroundExtras.clear();
+ 	}
+@@ -94,6 +108,15 @@ void SystemView::clearEntries()
+ 	mCarousel.clear();
+ }
+ 
++void SystemView::clearParkedExtras()
++{
++	for (auto& parked : mParkedExtras)
++		for (auto extra : parked.second)
++			delete extra;
++
++	mParkedExtras.clear();
++}
++
+ void SystemView::reloadTheme(SystemData* system)
+ {
+ 	auto carousel = mCarousel.asCarousel();
+@@ -148,6 +171,30 @@ static void forEachVideo(GuiComponent* comp, const std::function<void(VideoCompo
+ void SystemView::loadExtras(SystemData* system)
+ {
+ 	auto it = std::find_if(mEntries.begin(), mEntries.end(), [system](const SystemViewData& ss) { return ss.object == system; });
++
++	// Back to a tab shown before: its extras as they were (making them from the theme again takes long)
++	auto parked = mParkedExtras.find(system);
++	if (parked != mParkedExtras.cend())
++	{
++		if (it != mEntries.cend())
++		{
++			for (auto extra : it->backgroundExtras)
++				delete extra;
++
++			it->backgroundExtras = parked->second;
++		}
++		else
++		{
++			SystemViewData data;
++			data.object = system;
++			data.backgroundExtras = parked->second;
++			mEntries.push_back(data);
++		}
++
++		mParkedExtras.erase(parked);
++		return;
++	}
++
+ 	if (it != mEntries.cend())
+ 	{
+ 		// delete any existing extras
+@@ -156,7 +203,52 @@ void SystemView::loadExtras(SystemData* system)
+ 
+ 		it->backgroundExtras.clear();
+ 	}
+-	
++
++	auto extras = makeExtras(system, true);
++
++	if (it == mEntries.cend())
++	{
++		SystemViewData data;
++		data.object = system;
++		data.backgroundExtras = extras;
++		mEntries.push_back(data);
++	}
++	else
++		it->backgroundExtras = extras;
++
++	SystemRandomPlaylist::resetCache();
++}
++
++static const unsigned int PREPARE_AFTER_IDLE_MS = 1500;
++
++// Tabs: once the home is idle (no input for a while), the extras of the other tabs' systems are made ahead,
++// one system per frame, and kept for their tab (mParkedExtras): a tab then shows without making them
++void SystemView::prepareOtherTabs()
++{
++	if (!hasTabs() || mViewNeedsReload || mWindow->getTimeSinceLastInput() < PREPARE_AFTER_IDLE_MS || mWindow->peekGui() != ViewController::get())
++		return;
++
++	for (auto& tab : mTabs)
++	{
++		for (auto system : tab.systems)
++		{
++			if (system->getTheme() == nullptr || mParkedExtras.find(system) != mParkedExtras.cend())
++				continue;
++
++			if (std::find_if(mEntries.cbegin(), mEntries.cend(), [system](const SystemViewData& e) { return e.object == system; }) != mEntries.cend())
++				continue;
++
++			mParkedExtras[system] = makeExtras(system, false);
++			return;
++		}
++	}
++}
++
++std::vector<GuiComponent*> SystemView::makeExtras(SystemData* system, bool preload)
++{
++	// The same files for every system's elements: checked once
++	Utils::FileSystem::FileSystemCacheActivator fsc;
++
+ 	size_t vram = Settings::getInstance()->getInt("MaxVRAM") * 1024 * 1024;
+ 	size_t size = TextureResource::getTotalMemUsage();
+ 
+@@ -179,7 +271,7 @@ void SystemView::loadExtras(SystemData* system)
+ 		{
+ 			// Preload image if there's enough VRAM space				
+ 			auto tex = ((ImageComponent*)extra)->getTexture();
+-			if (tex && !tex->isLoaded())
++			if (preload && tex && !tex->isLoaded())
+ 			{
+ 				auto texSize = tex->getEstimatedVRAMUsage();
+ 				if (size + texSize < vram)
+@@ -231,26 +323,15 @@ void SystemView::loadExtras(SystemData* system)
+ 
+ 	// sort the extras by z-index
+ 	std::stable_sort(extras.begin(), extras.end(), [](GuiComponent* a, GuiComponent* b) { return b->getZIndex() > a->getZIndex(); });
+-
+-	if (it == mEntries.cend())
+-	{
+-		SystemViewData data;
+-		data.object = system;
+-		data.backgroundExtras = extras;
+-		mEntries.push_back(data);
+-	}
+-	else
+-		it->backgroundExtras = extras;
+-
+-	SystemRandomPlaylist::resetCache();
++	return extras;
+ }
+ 
+ 
+-void SystemView::populate()
++void SystemView::populate(bool keepExtras)
+ {
+ 	TextureLoader::paused = true;
+ 
+-	clearEntries();
++	clearEntries(keepExtras && !mViewNeedsReload);
+ 
+ 	// The view's elements come from the first system with a theme
+ 	if (mViewNeedsReload)
+@@ -731,6 +812,8 @@ void SystemView::showNavigationBar(const std::string& title, const std::function
+ 
+ void SystemView::update(int deltaTime)
+ {
++	prepareOtherTabs();
++
+ 	// A system's slides and suggestions, made off the UI thread, arrived: its card and the panel bind them
+ 	for (auto& entry : mEntries)
+ 	{
+@@ -1399,7 +1482,7 @@ void SystemView::moveTab(int direction)
+ 				select = system;
+ 
+ 	mActiveTab = tab;
+-	populate();
++	populate(true);
+ 	goToSystem(select, false);
+ }
+ 
+diff --git a/es-app/src/views/SystemView.h b/es-app/src/views/SystemView.h
+index 4d776d4c..c21fecc3 100644
+--- a/es-app/src/views/SystemView.h
++++ b/es-app/src/views/SystemView.h
+@@ -89,6 +89,8 @@ protected:
+ 
+ private:
+ 	void	 loadExtras(SystemData* system);
++	std::vector<GuiComponent*> makeExtras(SystemData* system, bool preload);
++	void	 prepareOtherTabs();
+ 	void	 ensureTexture(GuiComponent* extra, bool reload);
+ 
+ 	void	 updateExtraTextBinding();
+@@ -99,7 +101,10 @@ private:
+ 
+ 	void	 activateExtras(int cursor, bool activate = true);	
+ 	void	 updateExtras(const std::function<void(GuiComponent*)>& func);
+-	void	 clearEntries();
++	// keepExtras (a tab switch): the systems' extras are kept for their next show (mParkedExtras) instead of
++	// made again from the theme
++	void	 clearEntries(bool keepExtras = false);
++	void	 clearParkedExtras();
+ 
+ 	int		 moveCursorFast(bool forward = true);
+ 
+@@ -107,7 +112,7 @@ private:
+ 	bool	 showNavigationBar();
+ 	void	 showNavigationBar(const std::string& title, const std::function<std::string(SystemData* system)>& selector);
+ 
+-	void	 populate();
++	void	 populate(bool keepExtras = false);
+ 	void	 getViewElements(const std::shared_ptr<ThemeData>& theme);
+ 	void	 getDefaultElements(void);
+ 	void	 getCarouselFromTheme(const ThemeData::ThemeElement* elem);
+@@ -171,6 +176,7 @@ private:
+ 	std::string							mShownContinue;
+ 	unsigned int						mContinueShownAt;
+ 	std::map<SystemData*, int>			mSlidesBound;
++	std::map<SystemData*, std::vector<GuiComponent*>> mParkedExtras;
+ 
+ 	static std::map<std::string, int>	sSystemTabs;
+ };
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 7c5aef20..e281ecf5 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -67,6 +67,7 @@ public:
+ 	void normalizeNextUpdate();
+ 
+ 	inline bool isSleeping() const { return mSleeping; }
++	unsigned int getTimeSinceLastInput() const { return mTimeSinceLastInput; }
+ 
+ 	// The home and the game lists, with nothing over them, draw a frame only when it changes
+ 	// (Settings "RenderOnChange")

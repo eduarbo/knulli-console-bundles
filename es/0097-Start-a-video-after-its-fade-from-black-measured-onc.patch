@@ -1,0 +1,503 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 16:50:49 +0000
+Subject: [PATCH] Start a video after its fade from black, measured once
+
+A video that comes in over its snapshot waited through its recording's
+fade from black before the crossfade, 0.3 to 1 s more each time.
+
+Each video's lead-in is now measured once, off the UI thread (ffmpeg's
+first 1.5 s, at low priority), and kept by path, size and date in
+memory and in videoleadin.cache. The video then starts at it
+(":start-time"), so its first frame is lit and the crossfade starts at
+once; a video not measured yet is measured first and waits for its light
+as before. The cards shown and those loaded around them, and every
+system's last played game, are measured ahead; nothing is measured
+while a game runs.
+---
+ es-app/src/views/SystemView.cpp              |  14 ++
+ es-core/CMakeLists.txt                       |   2 +
+ es-core/src/Window.cpp                       |   6 +
+ es-core/src/components/GridTileComponent.cpp |   5 +
+ es-core/src/components/VideoLeadIn.cpp       | 216 +++++++++++++++++++
+ es-core/src/components/VideoLeadIn.h         |  23 ++
+ es-core/src/components/VideoLight.h          |  61 ++++++
+ es-core/src/components/VideoVlcComponent.cpp |  17 ++
+ 8 files changed, 344 insertions(+)
+ create mode 100644 es-core/src/components/VideoLeadIn.cpp
+ create mode 100644 es-core/src/components/VideoLeadIn.h
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index b71d3b0d..bf40428c 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -1,4 +1,5 @@
+ #include "views/SystemView.h"
++#include "components/VideoLeadIn.h"
+ 
+ #include "animations/LambdaAnimation.h"
+ #include "guis/GuiMsgBox.h"
+@@ -1043,6 +1044,11 @@ void SystemView::onCursorChanged(const CursorState& state)
+ 
+ 	Utils::FileSystem::preloadFileSystemCache(mEntries.at(mCursor).object->getRootFolder()->getPath(), true);
+ 
++	// the card's last played game's video: its fade from black measured first, if not known yet (VideoLeadIn)
++	FileData* played = mEntries.at(mCursor).object->getLastPlayedGame();
++	if (played != nullptr)
++		VideoLeadIn::request(played->getVideoPath(), true);
++
+ 	// update help style
+ 	updateHelpPrompts();
+ 
+@@ -2150,6 +2156,14 @@ void SystemView::onShow()
+ 	for (auto& entry : mEntries)
+ 		entry.object->getSlides();
+ 
++	// every card's last played game's video: their fades from black measured ahead (VideoLeadIn)
++	for (auto& entry : mEntries)
++	{
++		FileData* played = entry.object->getLastPlayedGame();
++		if (played != nullptr)
++			VideoLeadIn::request(played->getVideoPath(), false);
++	}
++
+ 	activateExtras(mCarousel.getCursorIndex());
+ 
+ 	for (auto sb : mStaticBackgrounds)
+diff --git a/es-core/CMakeLists.txt b/es-core/CMakeLists.txt
+index 67543b04..e11cc584 100644
+--- a/es-core/CMakeLists.txt
++++ b/es-core/CMakeLists.txt
+@@ -81,6 +81,7 @@ set(CORE_HEADERS
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoPlayerComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoVlcComponent.h
++	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoLeadIn.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VolumeInfoComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/BrightnessInfoComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/MultiLineMenuEntry.h
+@@ -218,6 +219,7 @@ set(CORE_SOURCES
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoPlayerComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoVlcComponent.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoLeadIn.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VolumeInfoComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/BrightnessInfoComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ScrollbarComponent.cpp
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index bd5da502..3e24a48c 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -26,6 +26,7 @@
+ #include "guis/GuiMsgBox.h"
+ #include "components/VolumeInfoComponent.h"
+ #include "components/VideoVlcComponent.h"
++#include "components/VideoLeadIn.h"
+ #include "components/BrightnessInfoComponent.h"
+ #include "Splash.h"
+ #include "PowerSaver.h"
+@@ -119,6 +120,8 @@ bool Window::init(bool initRenderer, bool initInputManager)
+ {
+ 	LOG(LogInfo) << "Window::init";
+ 
++	VideoLeadIn::pause(false);
++
+ 	if (initRenderer)
+ 	{
+ 		if (!Renderer::init())
+@@ -222,6 +225,9 @@ void Window::deinit(bool deinitRenderer)
+ 	// Their videos stop on a worker: a game run now could find the sound output still held
+ 	VideoVlcComponent::waitForPlayers(1500);
+ 
++	// no video measured while a game runs
++	VideoLeadIn::pause(true);
++
+ 	if (deinitRenderer)
+ 		InputManager::getInstance()->deinit();
+ 
+diff --git a/es-core/src/components/GridTileComponent.cpp b/es-core/src/components/GridTileComponent.cpp
+index 054056f1..ba0dda42 100644
+--- a/es-core/src/components/GridTileComponent.cpp
++++ b/es-core/src/components/GridTileComponent.cpp
+@@ -1,4 +1,5 @@
+ #include "GridTileComponent.h"
++#include "components/VideoLeadIn.h"
+ 
+ #include "resources/TextureResource.h"
+ #include "ThemeData.h"
+@@ -1104,6 +1105,10 @@ void GridTileComponent::setVideo(const std::string& path, float defaultDelay)
+ 
+ 	mVideoPath = path;
+ 
++	// the cards shown and those loaded around them: their videos' fades from black measured ahead
++	if (mVideo != nullptr && !mVideoPath.empty())
++		VideoLeadIn::request(mVideoPath, false);
++
+ 	if (mVideo != nullptr)
+ 	{
+ 		if (defaultDelay >= 0.0)
+diff --git a/es-core/src/components/VideoLeadIn.cpp b/es-core/src/components/VideoLeadIn.cpp
+new file mode 100644
+index 00000000..a331866c
+--- /dev/null
++++ b/es-core/src/components/VideoLeadIn.cpp
+@@ -0,0 +1,216 @@
++#include "components/VideoLeadIn.h"
++#include "components/VideoLight.h"
++
++#include "utils/FileSystemUtil.h"
++#include "utils/StringUtil.h"
++#include "Log.h"
++#include "Paths.h"
++
++#include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <set>
++#include <thread>
++
++namespace
++{
++	const char* FFMPEG = "/usr/bin/ffmpeg";
++	// the videos waiting for a measure: past this, the oldest of those asked after the others are dropped
++	const size_t MAX_WAITING = 64;
++
++	struct Known
++	{
++		std::string stamp;	// the file's size and date when measured
++		int ms;
++	};
++
++	std::mutex sLock;
++	std::condition_variable sWake;
++	std::map<std::string, Known> sKnown;
++	std::deque<std::string> sWaiting;
++	std::set<std::string> sWaitingSet;
++	bool sLoaded = false;
++	bool sStarted = false;
++	bool sPaused = false;
++	int sAvailable = -1;
++
++	std::string cachePath()
++	{
++		return Paths::getUserEmulationStationPath() + "/videoleadin.cache";
++	}
++
++	// The file's size and date, so a replaced file is measured again
++	std::string stampOf(const std::string& path)
++	{
++		return std::to_string(Utils::FileSystem::getFileSize(path)) + " " + Utils::FileSystem::getFileModificationDate(path).getIsoString();
++	}
++
++	// Lines "ms <tab> size date <tab> path"; a later line for a path wins. Under sLock.
++	void load()
++	{
++		if (sLoaded)
++			return;
++
++		sLoaded = true;
++		std::ifstream file(cachePath());
++		std::string line;
++		while (std::getline(file, line))
++		{
++			size_t a = line.find('\t');
++			size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
++			if (b == std::string::npos || b + 1 >= line.size())
++				continue;
++
++			sKnown[line.substr(b + 1)] = Known{ line.substr(a + 1, b - a - 1), atoi(line.substr(0, a).c_str()) };
++		}
++	}
++
++	void keep(const std::string& path, const std::string& stamp, int ms)
++	{
++		std::ofstream file(cachePath(), std::ios::app);
++		if (file)
++			file << ms << '\t' << stamp << '\t' << path << '\n';
++	}
++
++	std::string quoted(const std::string& s)
++	{
++		return "'" + Utils::String::replace(s, "'", "'\\''") + "'";
++	}
++
++	// The lead-in of a file from ffmpeg's showinfo of its first frames (each frame's time and luma), at low
++	// priority; 0 when ffmpeg reads no frame
++	int measure(const std::string& path)
++	{
++		std::string command = std::string("nice -n 10 ") + FFMPEG + " -hide_banner -nostdin -v info -threads 1 -an -sn -dn -t " +
++			std::to_string(VideoLight::VIDEO_LEAD_IN_MEASURED_MS / 1000.0f) + " -i " + quoted(path) + " -vf scale=32:24,showinfo -f null - 2>&1";
++
++		FILE* pipe = popen(command.c_str(), "r");
++		if (pipe == nullptr)
++			return 0;
++
++		std::vector<std::pair<int, int>> frames;
++		char buffer[1024];
++		while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
++		{
++			const char* time = strstr(buffer, "pts_time:");
++			const char* mean = strstr(buffer, "mean:[");
++			if (time == nullptr || mean == nullptr)
++				continue;
++
++			int ms = (int)(atof(time + 9) * 1000.0 + 0.5);
++			frames.push_back(std::make_pair(ms, VideoLight::videoRangeLight((float)atof(mean + 6))));
++		}
++
++		pclose(pipe);
++		return VideoLight::leadInMs(frames);
++	}
++
++	void run()
++	{
++		for (;;)
++		{
++			std::string path;
++			{
++				std::unique_lock<std::mutex> lock(sLock);
++				sWake.wait(lock, [] { return !sPaused && !sWaiting.empty(); });
++				path = sWaiting.front();
++				sWaiting.pop_front();
++				sWaitingSet.erase(path);
++			}
++
++			std::string stamp = stampOf(path);
++			{
++				std::unique_lock<std::mutex> lock(sLock);
++				auto it = sKnown.find(path);
++				if (it != sKnown.cend() && it->second.stamp == stamp)
++					continue;
++			}
++
++			int ms = measure(path);
++			LOG(LogDebug) << "VideoLeadIn: " << ms << " ms: " << path;
++
++			std::unique_lock<std::mutex> lock(sLock);
++			sKnown[path] = Known{ stamp, ms };
++			keep(path, stamp, ms);
++		}
++	}
++}
++
++int VideoLeadIn::find(const std::string& path)
++{
++	if (path.empty())
++		return -1;
++
++	std::string stamp = stampOf(path);
++
++	std::unique_lock<std::mutex> lock(sLock);
++	load();
++
++	auto it = sKnown.find(path);
++	return it != sKnown.cend() && it->second.stamp == stamp ? it->second.ms : -1;
++}
++
++void VideoLeadIn::request(const std::string& path, bool first)
++{
++	if (path.empty())
++		return;
++
++	std::unique_lock<std::mutex> lock(sLock);
++	if (sAvailable < 0)
++		sAvailable = Utils::FileSystem::exists(FFMPEG) ? 1 : 0;
++
++	if (sAvailable == 0)
++		return;
++
++	load();
++
++	// known (the worker looks at the file's stamp before it measures): nothing to do
++	if (sKnown.find(path) != sKnown.cend() && !first)
++		return;
++
++	if (sWaitingSet.find(path) != sWaitingSet.cend())
++	{
++		if (!first)
++			return;
++
++		for (auto it = sWaiting.begin(); it != sWaiting.end(); ++it)
++			if (*it == path)
++			{
++				sWaiting.erase(it);
++				break;
++			}
++	}
++	else
++		sWaitingSet.insert(path);
++
++	if (first)
++		sWaiting.push_front(path);
++	else
++		sWaiting.push_back(path);
++
++	while (sWaiting.size() > MAX_WAITING)
++	{
++		sWaitingSet.erase(sWaiting.back());
++		sWaiting.pop_back();
++	}
++
++	if (!sStarted)
++	{
++		sStarted = true;
++		std::thread(run).detach();
++	}
++
++	sWake.notify_one();
++}
++
++void VideoLeadIn::pause(bool paused)
++{
++	std::unique_lock<std::mutex> lock(sLock);
++	sPaused = paused;
++	sWake.notify_one();
++}
+diff --git a/es-core/src/components/VideoLeadIn.h b/es-core/src/components/VideoLeadIn.h
+new file mode 100644
+index 00000000..08d264c4
+--- /dev/null
++++ b/es-core/src/components/VideoLeadIn.h
+@@ -0,0 +1,23 @@
++#pragma once
++#ifndef ES_CORE_COMPONENTS_VIDEO_LEAD_IN_H
++#define ES_CORE_COMPONENTS_VIDEO_LEAD_IN_H
++
++#include <string>
++
++// A video's fade from black (its lead-in), measured once off the UI thread and kept by path, size and date (in
++// memory and in videoleadin.cache): a video that comes in over its snapshot starts after it, so its first frame
++// is lit (VideoLight). Measured with ffmpeg's first 1.5 s of the file; without ffmpeg nothing is known.
++namespace VideoLeadIn
++{
++	// The lead-in in ms (0: none), or -1 when not measured yet for this file as it is now
++	int find(const std::string& path);
++
++	// Measures the file if not known: first (the video about to play) or after those already asked (the cards
++	// shown and the next ones)
++	void request(const std::string& path, bool first);
++
++	// No measure starts while paused (a game runs)
++	void pause(bool paused);
++}
++
++#endif // ES_CORE_COMPONENTS_VIDEO_LEAD_IN_H
+diff --git a/es-core/src/components/VideoLight.h b/es-core/src/components/VideoLight.h
+index 1548b548..e72cc200 100644
+--- a/es-core/src/components/VideoLight.h
++++ b/es-core/src/components/VideoLight.h
+@@ -2,6 +2,10 @@
+ #ifndef ES_CORE_COMPONENTS_VIDEO_LIGHT_H
+ #define ES_CORE_COMPONENTS_VIDEO_LIGHT_H
+ 
++#include <algorithm>
++#include <utility>
++#include <vector>
++
+ // When a video that replaces its snapshot may show. Most videos open on a fade from black (picture and sound), and a
+ // crossfade into that dips the picture to black: the snapshot stays until the video's frames are lit and the fade is
+ // over (a frame no brighter than the one before), or until VIDEO_LIGHT_WAIT_MS after the first frame.
+@@ -49,6 +53,63 @@ namespace VideoLight
+ 		// still coming in from black: brighter than the frame before
+ 		return light <= lastLight + 1;
+ 	}
++
++	// How much of a video's first frames is measured for its fade from black (VideoLeadIn)
++	static const int VIDEO_LEAD_IN_MEASURED_MS = 1500;
++
++	// The light (0-255) of a frame whose luma is in video range (black 16, white 235)
++	inline int videoRangeLight(float y)
++	{
++		int light = (int)((y - 16.0f) * 255.0f / 219.0f + 0.5f);
++		return std::max(0, std::min(255, light));
++	}
++
++	// Where a video's picture is in after its fade from black, from its first frames (time in ms, light): the
++	// first frame lit to 80 % of the light after the fade (the median of the frames from 1 s on, else of the last
++	// third), and at least VIDEO_LIT. 0 when the video starts lit, stays dark, or darkens on the way (not a fade:
++	// then up to its first lit frame only).
++	inline int leadInMs(const std::vector<std::pair<int, int>>& frames)
++	{
++		if (frames.empty())
++			return 0;
++
++		std::vector<int> after;
++		for (auto& frame : frames)
++			if (frame.first >= 1000)
++				after.push_back(frame.second);
++
++		if (after.size() < 3)
++		{
++			after.clear();
++			for (size_t i = frames.size() - frames.size() / 3 - 1; i < frames.size(); i++)
++				after.push_back(frames[i].second);
++		}
++
++		std::sort(after.begin(), after.end());
++		int reference = after[after.size() / 2];
++		if (reference < VIDEO_LIT)
++			return 0;
++
++		int target = std::max(VIDEO_LIT, reference * 8 / 10);
++		int brightest = 0, firstLit = -1;
++		for (size_t i = 0; i < frames.size(); i++)
++		{
++			int light = frames[i].second;
++			if (light >= target)
++				return i == 0 ? 0 : frames[i].first;
++
++			if (firstLit < 0 && light >= VIDEO_LIT)
++				firstLit = (int)i;
++
++			// darker than before by more than noise: a scene, not a fade
++			if (light + 8 < brightest)
++				return firstLit <= 0 ? 0 : frames[firstLit].first;
++
++			brightest = std::max(brightest, light);
++		}
++
++		return 0;
++	}
+ }
+ 
+ #endif // ES_CORE_COMPONENTS_VIDEO_LIGHT_H
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 2498f683..c058d7bd 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -2,6 +2,7 @@
+ #include "components/ImageAspectCheck.h"
+ #include "components/ScreenShape.h"
+ #include "components/VideoLight.h"
++#include "components/VideoLeadIn.h"
+ 
+ #include "renderers/Renderer.h"
+ #include "resources/TextureResource.h"
+@@ -1196,6 +1197,22 @@ void VideoVlcComponent::startVideo()
+ 			if (mPlaylist != nullptr && mConfig.startDelay == 0 && !mConfig.showSnapshotDelay && !mConfig.showSnapshotNoVideo)
+ 				libvlc_media_add_option(mMedia, ":start-time=0.7");			
+ 
++			// A video that comes in over its snapshot starts after its fade from black, measured once
++			// (VideoLeadIn): its first frame is lit and the crossfade can start at once. Not measured yet, it
++			// is measured now for the next time, and this time the snapshot waits for the light (checkDisplayed)
++			if (mPlaylist == nullptr && waitsForLight())
++			{
++				int leadIn = VideoLeadIn::find(mVideoPath);
++				if (leadIn > 0)
++				{
++					char option[32];
++					snprintf(option, sizeof(option), ":start-time=%.3f", leadIn / 1000.0f);
++					libvlc_media_add_option(mMedia, option);
++				}
++				else if (leadIn < 0)
++					VideoLeadIn::request(mVideoPath, true);
++			}
++
+ 			Probe probe;
+ 			if (findProbe(mVideoPath, probe))
+ 			{

@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:22:34 +0000
+Subject: [PATCH] Keep the tabs' extras right when one system's theme reloads
+ or a tab jumps
+
+- A system's theme reloaded alone kept the extras parked for its tab, made
+  from the old theme; they are dropped, and made again when the tab shows.
+- Going to a system in another tab rebuilt the view without the parked
+  extras, throwing away those made ahead; they are kept, as on a tab
+  switch.
+---
+ es-app/src/views/SystemView.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index 4cc6ac7c..43628b3b 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -134,6 +134,16 @@ void SystemView::reloadTheme(SystemData* system)
+ 	const std::shared_ptr<ThemeData>& theme = system->getTheme();
+ 	getViewElements(theme);
+ 
++	// Extras kept for the system's tab were made from its old theme
++	auto parked = mParkedExtras.find(system);
++	if (parked != mParkedExtras.cend())
++	{
++		for (auto extra : parked->second)
++			delete extra;
++
++		mParkedExtras.erase(parked);
++	}
++
+ 	int idx = -1;
+ 	for (int i = 0; i < mEntries.size(); i++)
+ 	{
+@@ -417,8 +427,9 @@ void SystemView::goToSystem(SystemData* system, bool animate)
+ 			if (current != nullptr)
+ 				mTabCursors[mActiveTab] = current->getName();
+ 
++			// The tabs' extras are kept, those made ahead with them
+ 			mActiveTab = it->second;
+-			populate();
++			populate(true);
+ 		}
+ 	}
+ 

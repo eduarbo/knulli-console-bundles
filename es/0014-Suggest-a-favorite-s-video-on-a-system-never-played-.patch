@@ -1,0 +1,395 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:05:50 +0000
+Subject: [PATCH] Suggest a favorite's video on a system never played and move
+ on when it ends
+
+On a system with no game played, {system:continue} is now a suggestion: a random
+favorite with a preview video, each favorite once before any repeats (a new
+round never starts with the one just shown); without favorites, one of the 12
+best-rated games with a video. Without any, it stays the best-rated favorite.
+
+A system view <video> bound to {system:continue:video} plays the suggestion once:
+when it ends the view moves on to the next suggestion and binds the panel again,
+so its title, capture and X follow the video. The video of a game played last
+loops as before. Videos stop on their own when a game starts or the screen saver
+dims the screen.
+---
+ THEMES.md                       | 10 ++++---
+ THEMES_BINDINGS.md              |  2 +-
+ es-app/src/HomeSlides.cpp       | 43 ++++++++++++++++++++++++++++++
+ es-app/src/HomeSlides.h         | 27 ++++++++++++++++++-
+ es-app/src/SystemData.cpp       | 39 ++++++++++++++++++++++++++-
+ es-app/src/SystemData.h         | 10 ++++++-
+ es-app/src/views/SystemView.cpp | 47 +++++++++++++++++++++++++++++++--
+ es-app/src/views/SystemView.h   |  2 ++
+ 8 files changed, 171 insertions(+), 9 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 8ee266fe..e4b748f0 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -743,9 +743,13 @@ separated by `,`:
+ * Each visible system is in one tab: the first that lists it. Visible systems that no tab lists go to the
+   tab with `*`, or to the last tab. Hidden and empty systems are left out, and so are tabs with no system.
+ * Going to a system (back from its game list, at start-up) shows its tab.
+-* X continues the selected system's game, `{system:continue}`: the one played last, else its best-rated
+-  favorite; with neither, and on tools, emulators and screenshots (`{system:hasContinue}` false), X does nothing.
+-  B does not open the navigation bar, which lists every system.
++* X continues the selected system's game, `{system:continue}`: the one played last, else the suggested game
++  (below), else its best-rated favorite; with none, and on tools, emulators and screenshots
++  (`{system:hasContinue}` false), X does nothing. B does not open the navigation bar, which lists every system.
++* On a system never played, `{system:continue}` is a suggestion: a random favorite with a preview video, each
++  favorite once before any repeats (without favorites, one of the 12 best-rated games with a video). A system
++  view `<video>` whose path is `{system:continue:video}` plays it once and the view moves on to the next
++  suggestion, so the panel's other bindings follow the video; the last game's video loops.
+ * `{system:tab}` is the index of the system's tab in the list (0 for the first), -1 without tabs, so the
+   theme can draw the tab row (`"./tabs/" + {system:tab} + ".png"`).
+ * A tab with more systems than the grid shows at once (`autoLayout` columns × rows) uses
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index c7250459..05857b87 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -44,7 +44,7 @@ mostPlayed                  int
+ gameTime                    string
+ lastPlayedDate              string
+ lastPlayed                  game                   The game played last ({system:lastPlayed:name}); empty if none. A collection leaves out tools, emulators and screenshots
+-continue                    game                   lastPlayed, else the best-rated favorite (else the best-rated game)
++continue                    game                   lastPlayed, else the suggested game (THEMES.md, Tabs), else the best-rated favorite (else the best-rated game)
+ hasLastPlayed               bool                   lastPlayed exists and still resolves to a game
+ hasContinue                 bool                   continue resolves and is not on tools, emulators or screenshots (X does nothing there)
+ slides                      string                 The captures of the system's card, one path per line: favorites with a screenshot, else the 12 best-rated games with one (THEMES.md, Slides)
+diff --git a/es-app/src/HomeSlides.cpp b/es-app/src/HomeSlides.cpp
+index 5bf85fde..12a7e5e8 100644
+--- a/es-app/src/HomeSlides.cpp
++++ b/es-app/src/HomeSlides.cpp
+@@ -147,4 +147,47 @@ namespace HomeSlides
+ 
+ 		return slides;
+ 	}
++
++	std::vector<std::string> pickPool(std::vector<Candidate> candidates, size_t fallbackCount)
++	{
++		std::vector<std::string> ids;
++		for (auto& candidate : pool(candidates, fallbackCount))
++			ids.push_back(candidate.id);
++
++		return ids;
++	}
++
++	void Deck::reset(const std::vector<std::string>& items, std::mt19937& rng)
++	{
++		mItems = items;
++		mIndex = 0;
++		std::shuffle(mItems.begin(), mItems.end(), rng);
++	}
++
++	const std::string& Deck::current() const
++	{
++		static const std::string none;
++		return mItems.empty() ? none : mItems[mIndex];
++	}
++
++	bool Deck::next(std::mt19937& rng)
++	{
++		if (mItems.size() < 2)
++			return false;
++
++		if (mIndex + 1 < mItems.size())
++		{
++			mIndex++;
++			return true;
++		}
++
++		// A new round: shuffled again, not starting with the item just shown
++		std::string last = mItems[mIndex];
++		std::shuffle(mItems.begin(), mItems.end(), rng);
++		if (mItems.front() == last)
++			std::swap(mItems.front(), mItems[1 + rng() % (mItems.size() - 1)]);
++
++		mIndex = 0;
++		return true;
++	}
+ }
+diff --git a/es-app/src/HomeSlides.h b/es-app/src/HomeSlides.h
+index 54194a1f..69c8da47 100644
+--- a/es-app/src/HomeSlides.h
++++ b/es-app/src/HomeSlides.h
+@@ -2,11 +2,12 @@
+ #ifndef ES_APP_HOME_SLIDES_H
+ #define ES_APP_HOME_SLIDES_H
+ 
++#include <random>
+ #include <set>
+ #include <string>
+ #include <vector>
+ 
+-// The tabbed home's slides: the captures a system card slides through.
++// The tabbed home's slides: the captures a system card slides through and the games its panel suggests.
+ // Free of ES types so it can be tested alone.
+ namespace HomeSlides
+ {
+@@ -40,6 +41,30 @@ namespace HomeSlides
+ 	// A card's captures: its favorites with a capture, else its best-rated games with one (at most
+ 	// fallbackCount); the excluded left out; the representatives first, then by rating and name.
+ 	std::vector<std::string> orderSlides(std::vector<Candidate> candidates, const Rules& rules, size_t fallbackCount);
++
++	// The panel's pool, as ids: the favorites with a video, else the best-rated games with one (at most
++	// fallbackCount). Exclusions are about captures, so they do not apply.
++	std::vector<std::string> pickPool(std::vector<Candidate> candidates, size_t fallbackCount);
++
++	// Items in a random order, each shown once before any repeats; a new round never starts with the item
++	// shown last.
++	class Deck
++	{
++	public:
++		Deck() : mIndex(0) { }
++
++		void reset(const std::vector<std::string>& items, std::mt19937& rng);
++		bool empty() const { return mItems.empty(); }
++		size_t size() const { return mItems.size(); }
++		const std::string& current() const;
++
++		// Moves to the next item; false (and stays) when there is no other one
++		bool next(std::mt19937& rng);
++
++	private:
++		std::vector<std::string> mItems;
++		size_t mIndex;
++	};
+ }
+ 
+ #endif // ES_APP_HOME_SLIDES_H
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 6541bca1..87762c6c 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -23,6 +23,7 @@
+ #include <unordered_set>
+ #include <algorithm>
+ #include <functional>
++#include <random>
+ #include "SaveStateRepository.h"
+ #include "Paths.h"
+ #include "SystemRandomPlaylist.h"
+@@ -74,6 +75,7 @@ SystemData::SystemData(const SystemMetadata& meta, SystemEnvironmentData* envDat
+ 	mGameListHash = 0;
+ 	mGameCountInfo = nullptr;
+ 	mSlidesReady = false;
++	mSuggestionsReady = false;
+ 	mSortId = Settings::getInstance()->getInt(getName() + ".sort");
+ 	mUnlimitedRecursiveDepth = Settings::getInstance()->getBool(getName() + ".unlimited_recursive_depth");
+ 	int depth;
+@@ -1500,8 +1502,9 @@ void SystemData::updateDisplayedGameCount()
+ 
+ 	mGameCountInfo = nullptr;
+ 
+-	// A favorite or a capture changed: the home's slides are made again
++	// A favorite or a capture changed: the home's slides and suggestions are made again
+ 	mSlidesReady = false;
++	mSuggestionsReady = false;
+ }
+ 
+ void SystemData::loadTheme()
+@@ -2152,12 +2155,21 @@ FileData* SystemData::getLastPlayedGame(bool orChefPick)
+ 		return nullptr;
+ 
+ 	FileData* game = info->lastPlayedPath.empty() ? nullptr : mRootFolder->FindByPath(info->lastPlayedPath);
++	if (game == nullptr && orChefPick)
++		game = getSuggestedGame();
+ 	if (game == nullptr && orChefPick && !info->chefPickPath.empty())
+ 		game = mRootFolder->FindByPath(info->chefPickPath);
+ 
+ 	return game;
+ }
+ 
++static std::mt19937& homeRandom()
++{
++	static std::random_device device;
++	static std::mt19937 engine(device());
++	return engine;
++}
++
+ // The games of the system and of the systems grouped in it, each keyed by its own system and its path
+ // in that system's folder (as the gamelist and the theme variable "systemslides" write it)
+ std::vector<HomeSlides::Candidate> SystemData::getHomeCandidates(bool video)
+@@ -2206,6 +2218,31 @@ const std::vector<std::string>& SystemData::getSlides()
+ 	return mSlides;
+ }
+ 
++FileData* SystemData::getSuggestedGame()
++{
++	if (mRootFolder == nullptr || isUtilitySystem(this))
++		return nullptr;
++
++	if (!mSuggestionsReady)
++	{
++		mSuggestionsReady = true;
++		mSuggestions.reset(HomeSlides::pickPool(getHomeCandidates(true), 12), homeRandom());
++	}
++
++	if (mSuggestions.empty())
++		return nullptr;
++
++	return mRootFolder->FindByPath(mSuggestions.current());
++}
++
++bool SystemData::nextSuggestion()
++{
++	if (getSuggestedGame() == nullptr)
++		return false;
++
++	return mSuggestions.next(homeRandom());
++}
++
+ FileData* SystemData::getContinueGame()
+ {
+ 	return isUtilitySystem(this) ? nullptr : getLastPlayedGame(true);
+diff --git a/es-app/src/SystemData.h b/es-app/src/SystemData.h
+index 171a4e9d..b32a49ad 100644
+--- a/es-app/src/SystemData.h
++++ b/es-app/src/SystemData.h
+@@ -113,7 +113,8 @@ public:
+ 	GameCountInfo* getGameCountInfo();
+ 	void updateDisplayedGameCount();
+ 
+-	// The game played last (nullptr if none); with orChefPick, else the best-rated favorite or game
++	// The game played last (nullptr if none); with orChefPick, else the suggested game, else the best-rated
++	// favorite or game
+ 	FileData* getLastPlayedGame(bool orChefPick = false);
+ 	// What X continues: getLastPlayedGame(true), nothing on a utility system
+ 	FileData* getContinueGame();
+@@ -125,6 +126,11 @@ public:
+ 	// with one, else its best-rated games, as the theme variable "systemslides" orders and filters them
+ 	// (HomeSlides::Rules); none on collections and utilities.
+ 	const std::vector<std::string>& getSlides();
++	// On a system never played, the game the panel suggests: a random favorite with a preview video, each
++	// one once before any repeats, else a best-rated game with one; nullptr without any
++	FileData* getSuggestedGame();
++	// The next suggestion (when its video ends); false when there is no other one
++	bool nextSuggestion();
+ 
+ 	static bool IsManufacturerSupported;
+ 	static bool hasDirtySystems();
+@@ -296,6 +302,8 @@ private:
+ 
+ 	std::vector<std::string> mSlides;
+ 	bool mSlidesReady;
++	HomeSlides::Deck mSuggestions;
++	bool mSuggestionsReady;
+ 
+ 	bool mHidden;
+ };
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index f58dd707..55605317 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -58,6 +58,7 @@ SystemView::SystemView(Window* window) : GuiComponent(window),
+ 	mPressedPoint = Vector2i(-1, -1);
+ 
+ 	mActiveTab = 0;
++	mSuggestionChanged = false;
+ 
+ 	setSize((float)Renderer::getScreenWidth(), (float)Renderer::getScreenHeight());
+ 	populate();
+@@ -132,6 +133,15 @@ void SystemView::reloadTheme(SystemData* system)
+ 	loadExtras(system);	
+ }
+ 
++static void forEachVideo(GuiComponent* comp, const std::function<void(VideoComponent*)>& func)
++{
++	if (comp->isKindOf<VideoComponent>())
++		func((VideoComponent*)comp);
++
++	for (int i = 0; i < comp->getChildCount(); i++)
++		forEachVideo(comp->getChild(i), func);
++}
++
+ void SystemView::loadExtras(SystemData* system)
+ {
+ 	auto it = std::find_if(mEntries.begin(), mEntries.end(), [system](const SystemViewData& ss) { return ss.object == system; });
+@@ -197,6 +207,18 @@ void SystemView::loadExtras(SystemData* system)
+ 		}
+ 	}
+ 
++	// The panel's videos of {system:continue}, in a container or not: see onContinueVideoEnded
++	for (auto extra : extras)
++	{
++		forEachVideo(extra, [this, system](VideoComponent* video)
++		{
++			auto expressions = video->getBindingExpressions();
++			auto path = expressions.find("path");
++			if (path != expressions.cend() && path->second.find("{system:continue") != std::string::npos)
++				video->setOnVideoEnded([this, system]() { return onContinueVideoEnded(system); });
++		});
++	}
++
+ 	// sort the extras by z-index
+ 	std::stable_sort(extras.begin(), extras.end(), [](GuiComponent* a, GuiComponent* b) { return b->getZIndex() > a->getZIndex(); });
+ 
+@@ -530,8 +552,8 @@ bool SystemView::input(InputConfig* config, Input input)
+ 
+ 	if (input.value != 0)
+ 	{
+-		// Tabs: X continues the selected system's last game, else plays its best-rated favorite; nothing
+-		// on tools, emulators and screenshots (it never runs a tool again unasked)
++		// Tabs: X continues the selected system's last game, else plays the game the panel suggests;
++		// nothing on tools, emulators and screenshots (it never runs a tool again unasked)
+ 		if (hasTabs() && config->isMappedTo("x", input))
+ 		{
+ 			SystemData* system = getSelected();
+@@ -690,6 +712,13 @@ void SystemView::showNavigationBar(const std::string& title, const std::function
+ 
+ void SystemView::update(int deltaTime)
+ {
++	// A suggestion's video ended: the panel shows the next suggestion, before the video restarts
++	if (mSuggestionChanged)
++	{
++		mSuggestionChanged = false;
++		updateExtraTextBinding();
++	}
++
+ 	mCarousel.update(deltaTime);
+ 	mSystemInfo.update(deltaTime);
+ 
+@@ -712,6 +741,20 @@ void SystemView::update(int deltaTime)
+ 	}
+ }
+ 
++// The panel's video of {system:continue}: the last game's loops; on a system never played, a suggestion's
++// ends and the panel moves on to the next suggestion (SystemData::nextSuggestion)
++bool SystemView::onContinueVideoEnded(SystemData* system)
++{
++	if (system == nullptr || system != getSelected() || system->getLastPlayedGame() != nullptr)
++		return true;
++
++	if (!system->nextSuggestion())
++		return true;
++
++	mSuggestionChanged = true;
++	return false;
++}
++
+ void SystemView::updateExtraTextBinding()
+ {
+ 	int mCursor = mCarousel.getCursorIndex();
+diff --git a/es-app/src/views/SystemView.h b/es-app/src/views/SystemView.h
+index c67127f8..045c7fd0 100644
+--- a/es-app/src/views/SystemView.h
++++ b/es-app/src/views/SystemView.h
+@@ -116,6 +116,7 @@ private:
+ 	bool	 buildTabs();
+ 	void	 applyTabGrid();
+ 	void	 moveTab(int direction);
++	bool	 onContinueVideoEnded(SystemData* system);
+ 
+ 	void	 renderCarousel(const Transform4x4f& parentTrans);
+ 	void	 renderExtras(const Transform4x4f& parentTrans, float lower, float upper);
+@@ -163,6 +164,7 @@ private:
+ 	std::vector<SystemViewTab>			mTabs;
+ 	int									mActiveTab;
+ 	std::map<int, std::string>			mTabCursors;
++	bool								mSuggestionChanged;
+ 
+ 	static std::map<std::string, int>	sSystemTabs;
+ };

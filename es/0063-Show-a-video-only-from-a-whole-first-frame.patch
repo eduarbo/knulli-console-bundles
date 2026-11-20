@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 04:43:01 +0000
+Subject: [PATCH] Show a video only from a whole first frame
+
+- A video frame is copied into its texture while its buffer's lock is
+  held. The first frame was only pointed at and copied when the texture
+  was first drawn, after the lock was let go: by then the player could be
+  writing the next frame into that buffer, and the texture got a frame
+  half new, half old (the rest of a black start), which stayed until the
+  next frame.
+- The texture keeps no pointer to the player's buffers (it was read
+  again when the texture was reloaded, also after the buffers were
+  freed); a frame of another size makes the texture again.
+- The video replaces the snapshot only once its first frame is in the
+  texture.
+---
+ es-core/src/components/VideoVlcComponent.cpp | 66 +++++++++++++-------
+ es-core/src/components/VideoVlcComponent.h   |  1 +
+ es-core/src/resources/TextureData.cpp        | 19 ++++--
+ 3 files changed, 59 insertions(+), 27 deletions(-)
+
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 6c7e760c..fb97cc50 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -691,28 +691,18 @@ void VideoVlcComponent::render(const Transform4x4f& parentTrans)
+ 
+ 	// Build a texture for the video frame
+ 	if (initFromPixels)
+-	{		
+-		int frame = mContext->surfaceId;
+-		if (mContext->hasFrame[frame])
+-		{
+-			if (mTexture == nullptr)
+-			{
+-				mTexture = TextureResource::get("", false, mLinearSmooth);
+-
+-				resize();
+-				trans = parentTrans * getTransform();
+-			}
+-
++	{
+ #ifdef _RPI_
+-			// Rpi : A lot of videos are encoded in 60fps on screenscraper
+-			// Try to limit transfert to opengl textures to 30fps to save CPU
+-			if (!Settings::getInstance()->getBool("OptimizeVideo") || mElapsed >= 40) // 40ms = 25fps, 33.33 = 30 fps
++		// Rpi : A lot of videos are encoded in 60fps on screenscraper
++		// Try to limit transfert to opengl textures to 30fps to save CPU
++		if (!Settings::getInstance()->getBool("OptimizeVideo") || mElapsed >= 40) // 40ms = 25fps, 33.33 = 30 fps
+ #endif
++		{
++			bool created = (mTexture == nullptr);
++			if (uploadFrame())
+ 			{
+-				mContext->mutexes[frame].lock();
+-				mTexture->updateFromExternalPixels(mContext->surfaces[frame], mVideoWidth, mVideoHeight);
+-				mContext->hasFrame[frame] = false;
+-				mContext->mutexes[frame].unlock();
++				if (created)
++					trans = parentTrans * getTransform();
+ 
+ 				mElapsed = 0;
+ 			}
+@@ -926,11 +916,43 @@ bool VideoVlcComponent::waitForPlayers(int ms)
+ 	return done;
+ }
+ 
+-// The first frame VLC displayed: the video shows from now on
++// Copies the newest whole frame into the texture, under that frame's lock: the player writes into a buffer only
++// while it holds its lock, so the texture never gets a frame half written. False when there was no new frame.
++bool VideoVlcComponent::uploadFrame()
++{
++	if (mContext == nullptr || !mContext->valid)
++		return false;
++
++	int frame = mContext->surfaceId;
++	if (!mContext->hasFrame[frame])
++		return false;
++
++	std::unique_lock<std::mutex> lock(mContext->mutexes[frame]);
++	if (!mContext->hasFrame[frame])
++		return false;
++
++	if (mTexture == nullptr)
++	{
++		mTexture = TextureResource::get("", false, mLinearSmooth);
++		resize();
++	}
++
++	mTexture->updateFromExternalPixels(mContext->surfaces[frame], mVideoWidth, mVideoHeight);
++	mContext->hasFrame[frame] = false;
++	return true;
++}
++
++// The first frame VLC displayed: the video shows from now on, once that frame is whole in the texture (until
++// then the snapshot, or what is under the video, stays)
+ void VideoVlcComponent::checkDisplayed()
+ {
+-	if (mContext != nullptr && mContext->valid && mContext->displayed && !mIsPlaying && mIsWaitingForVideoToStart)
+-		onVideoStarted();
++	if (mContext == nullptr || !mContext->valid || !mContext->displayed || mIsPlaying || !mIsWaitingForVideoToStart)
++		return;
++
++	if (!uploadFrame() && (mTexture == nullptr || !mTexture->isLoaded()))
++		return;
++
++	onVideoStarted();
+ }
+ 
+ void VideoVlcComponent::handleLooping()
+diff --git a/es-core/src/components/VideoVlcComponent.h b/es-core/src/components/VideoVlcComponent.h
+index 51556bcb..bcf4a301 100644
+--- a/es-core/src/components/VideoVlcComponent.h
++++ b/es-core/src/components/VideoVlcComponent.h
+@@ -153,6 +153,7 @@ private:
+ 	void startPlayback(const Probe& probe);
+ 	void checkStart();
+ 	void checkDisplayed();
++	bool uploadFrame();
+ 	static bool findProbe(const std::string& path, Probe& probe);
+ 	static void keepProbe(const std::string& path, const Probe& probe);
+ 
+diff --git a/es-core/src/resources/TextureData.cpp b/es-core/src/resources/TextureData.cpp
+index b22dc11a..77b86c43 100644
+--- a/es-core/src/resources/TextureData.cpp
++++ b/es-core/src/resources/TextureData.cpp
+@@ -221,22 +221,31 @@ bool TextureData::initFromRGBA(unsigned char* dataRGBA, size_t width, size_t hei
+ 
+ bool TextureData::updateFromExternalRGBA(unsigned char* dataRGBA, size_t width, size_t height)
+ {
+-	// If already initialised then don't read again
++	// The pixels are read now, while the caller holds them (a video's frame buffer, written again by its
++	// player once let go): no pointer to them is kept for a later upload
+ 	std::unique_lock<std::mutex> lock(mMutex);
+ 
+ 	if (!mIsExternalDataRGBA && mDataRGBA != nullptr)
+ 		delete[] mDataRGBA;
+ 
+-	mIsExternalDataRGBA = true;
+-	mDataRGBA = dataRGBA;
++	mIsExternalDataRGBA = false;
++	mDataRGBA = nullptr;
++
++	if (mTextureID != 0 && (mSize.x() != (int)width || mSize.y() != (int)height))
++	{
++		Renderer::destroyTexture(mTextureID);
++		mTextureID = 0;
++	}
+ 
+ 	mSize = Vector2i(width, height);
+ 	mPhysicalSize = Vector2f(width, height);
+ 
+ 	if (mTextureID != 0)
+-		Renderer::updateTexture(mTextureID, Renderer::Texture::RGBA, 0, 0, width, height, mDataRGBA);
++		Renderer::updateTexture(mTextureID, Renderer::Texture::RGBA, 0, 0, width, height, dataRGBA);
++	else
++		mTextureID = Renderer::createTexture(Renderer::Texture::RGBA, mLinear, mTile, width, height, dataRGBA);
+ 
+-	return true;
++	return mTextureID != 0;
+ }
+ 
+ // Avoid multiple extraction in the same file at the same time

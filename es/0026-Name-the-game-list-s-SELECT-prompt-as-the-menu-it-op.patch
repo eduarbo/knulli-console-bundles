@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:02:10 +0000
+Subject: [PATCH] Name the game list's SELECT prompt as the menu it opens
+
+- SELECT opens the list's options, titled "VIEW OPTIONS"; the prompt said
+  "OPTIONS", which some catalogues give the same label as the title and as
+  the menu's last group.
+---
+ es-app/src/views/gamelist/ISimpleGameListView.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/es-app/src/views/gamelist/ISimpleGameListView.cpp b/es-app/src/views/gamelist/ISimpleGameListView.cpp
+index c7cdcdcb..d2a13afa 100644
+--- a/es-app/src/views/gamelist/ISimpleGameListView.cpp
++++ b/es-app/src/views/gamelist/ISimpleGameListView.cpp
+@@ -689,7 +689,7 @@ std::vector<HelpPrompt> ISimpleGameListView::getHelpPrompts()
+ 		prompts.push_back(HelpPrompt(BUTTON_OK, _("GAME OPTIONS (HOLD)"), [&] { showSelectedGameOptions(); }));
+ 
+ 	if (!UIModeController::getInstance()->isUIModeKid())
+-		prompts.push_back(HelpPrompt("select", _("OPTIONS"), [&] { showGamelistOptions(); }));
++		prompts.push_back(HelpPrompt("select", _("VIEW OPTIONS"), [&] { showGamelistOptions(); }));
+ 
+ 	if (cursorHasSaveStatesEnabled())
+ 	{

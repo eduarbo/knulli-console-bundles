@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:05:45 +0000
+Subject: [PATCH] Read each fallback font once for all fonts
+
+- Every font loaded its own copy of each fallback font (DroidSansFallbackFull
+  alone is 4 MB) the first time it missed a glyph; their faces now share the
+  file's bytes.
+---
+ es-core/src/resources/Font.cpp | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/es-core/src/resources/Font.cpp b/es-core/src/resources/Font.cpp
+index 95add9eb..0c750b95 100644
+--- a/es-core/src/resources/Font.cpp
++++ b/es-core/src/resources/Font.cpp
+@@ -294,6 +294,17 @@ std::vector<std::string> getFallbackFontPaths()
+ 
+ #if defined(WIN32) || defined(X86) || defined(X86_64)
+ static std::map<std::string, ResourceData> globalTTFCache;
++#else
++static ResourceData getFallbackFontData(const std::string& path)
++{
++	static std::map<std::string, ResourceData> fallbackData;
++
++	auto it = fallbackData.find(path);
++	if (it == fallbackData.cend())
++		it = fallbackData.insert(std::make_pair(path, ResourceManager::getInstance()->getFileData(path))).first;
++
++	return it->second;
++}
+ #endif
+ 
+ FT_Face Font::getFaceForChar(unsigned int id)
+@@ -325,7 +336,9 @@ FT_Face Font::getFaceForChar(unsigned int id)
+ 
+ 			mFaceCache[i] = std::unique_ptr<FontFace>(new FontFace(std::move(itCache->second), mSize));
+ #else
+-			ResourceData data = ResourceManager::getInstance()->getFileData(path);
++			// A fallback font's file is read once for all fonts (DroidSansFallbackFull alone is 4 MB, read again for
++			// every font made on a view's load): their faces share its bytes
++			ResourceData data = (i == 0 ? ResourceManager::getInstance()->getFileData(path) : getFallbackFontData(path));
+ 			mFaceCache[i] = std::unique_ptr<FontFace>(new FontFace(std::move(data), mSize));
+ #endif
+ 			fit = mFaceCache.find(i);

@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 23:59:22 +0000
+Subject: [PATCH] Pause the views' videos and slideshows after a minute without
+ input
+
+- After IdlePause seconds without input (default 60; 0 never), a theme's
+  video stops at the end of its loop and shows its snapshot or what is under
+  it (IdlePauseVideo), and the system view's panel moves on to no other
+  suggestion; slideshows end the change under way and stay on their capture
+  (IdlePauseSlides). Any input resumes them. Screen saver videos are not
+  paused.
+---
+ THEMES.md                                     | 14 +++++++++++---
+ es-core/src/Settings.cpp                      |  3 +++
+ es-core/src/Window.cpp                        | 12 +++++++++++-
+ es-core/src/Window.h                          |  8 ++++++++
+ es-core/src/components/SlideLayout.h          |  8 ++++++--
+ es-core/src/components/SlideshowComponent.cpp |  4 +++-
+ es-core/src/components/SlideshowComponent.h   |  3 ++-
+ es-core/src/components/VideoComponent.cpp     | 15 ++++++++++++++-
+ es-core/src/components/VideoComponent.h       |  2 ++
+ es-core/src/components/VideoVlcComponent.cpp  | 10 ++++++++++
+ 10 files changed, 70 insertions(+), 9 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 388e4b0d..bd1bc2f6 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1176,9 +1176,9 @@ Captures shown one at a time at whole-pixel scales: the smallest of 1/4, 1/2, 1,
+ capture's region of interest covers the element, centred (on the capture's pixel grid at 2x and up), so pixel
+ art stays sharp. In a grid's item template it moves only on the selected item: every `interval` seconds the
+ next capture slides in from the right in `duration` seconds, and the other items show the first capture. It
+-stops under the screen saver and while the view is hidden; a capture that does not load (gone, not an image) is
+-asked for once more, then skipped. Child elements (a screen filter, a frame) are drawn over the captures, the
+-dots over them.
++stops under the screen saver, while the view is hidden and with the idle pause (Idle pause, below); a capture
++that does not load (gone, not an image) is asked for once more, then skipped. Child elements (a screen filter, a
++frame) are drawn over the captures, the dots over them.
+ 
+ * `pos`, `size`, `x`, `y`, `w`, `h`, `origin`, `opacity`, `visible`, `zIndex` - as for `image`.
+ * `path` - type: STRING.
+@@ -1211,6 +1211,14 @@ frame), and at least once a second; otherwise the screen keeps its frame and ES
+ or an event. `RenderOnChangeVerify` (for tests) draws every frame and logs any frame the cache would have left
+ out whose pixels changed; `DrawFramerate` shows the frames drawn per second.
+ 
++##### Idle pause
++
++After `IdlePause` seconds without input (es_settings, default 60; 0 never), the videos of the views stop at the
++end of their loop and show their snapshot or what is under them (`IdlePauseVideo`, default true; the system
++view's panel moves on to no other suggestion), and slideshows finish the change under way and stay on their
++capture (`IdlePauseSlides`, default true). Any input resumes them; so does a resume from system suspend, which
++also leaves the screen saver. The screen saver's videos are not paused.
++
+ #### rating
+ 
+ * `pos` - type: NORMALIZED_PAIR.
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index aa459a53..06c575f4 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -124,6 +124,9 @@ void Settings::setDefaults()
+ 	mBoolMap["DrawFramerate"] = false;
+ 	mBoolMap["RenderOnChange"] = true;
+ 	mBoolMap["RenderOnChangeVerify"] = false;
++	mIntMap["IdlePause"] = 60;
++	mBoolMap["IdlePauseVideo"] = true;
++	mBoolMap["IdlePauseSlides"] = true;
+ 	mBoolMap["ScrollLoadMedias"] = false;	
+ 	mBoolMap["ShowExit"] = true;
+ 	mBoolMap["ExitOnRebootRequired"] = false;
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index ebe1ba53..d7496a45 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -32,7 +32,7 @@
+ #endif
+ 
+ Window::Window() : mNormalizeNextUpdate(false), mFrameTimeElapsed(0), mFrameCountElapsed(0), mFrameDrawnStart(0), mAverageDeltaTime(10),
+-  mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mScreenSaver(NULL), mRenderScreenSaver(false), mClockElapsed(0), mMouseCapture(nullptr), mMenuBackgroundShaderTextureCache(-1)
++  mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mIdleVideo(false), mIdleSlides(false), mScreenSaver(NULL), mRenderScreenSaver(false), mClockElapsed(0), mMouseCapture(nullptr), mMenuBackgroundShaderTextureCache(-1)
+ {			
+ 	mTransitionOffset = 0;
+ 
+@@ -523,6 +523,7 @@ void Window::update(int deltaTime)
+ 	}
+ 
+ 	mTimeSinceLastInput += deltaTime;
++	updateIdlePause();
+ 
+ 	if (peekGui())
+ 		peekGui()->update(deltaTime);
+@@ -929,6 +930,15 @@ bool Window::drawsOnlyChanges()
+ 	return mGuiStack.size() == 1 && !mRenderScreenSaver && !mSleeping && Settings::getInstance()->getBool("RenderOnChange");
+ }
+ 
++void Window::updateIdlePause()
++{
++	int seconds = Settings::getInstance()->getInt("IdlePause");
++	bool idle = seconds > 0 && mTimeSinceLastInput >= (unsigned int)seconds * 1000;
++
++	mIdleVideo = idle && Settings::getInstance()->getBool("IdlePauseVideo");
++	mIdleSlides = idle && Settings::getInstance()->getBool("IdlePauseSlides");
++}
++
+ void Window::normalizeNextUpdate()
+ {
+ 	mNormalizeNextUpdate = true;
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 7e07bd88..5ae98814 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -71,6 +71,11 @@ public:
+ 	// The home and the game lists, with nothing over them, draw a frame only when it changes
+ 	// (Settings "RenderOnChange")
+ 	bool drawsOnlyChanges();
++
++	// Idle pause: after "IdlePause" seconds without input (0: never), the views' videos stop at the end of
++	// their loop ("IdlePauseVideo") and their slideshows stop moving ("IdlePauseSlides"); input resumes them
++	enum IdlePart { IDLE_VIDEO, IDLE_SLIDES };
++	bool isIdlePaused(IdlePart part) const { return part == IDLE_VIDEO ? mIdleVideo : mIdleSlides; }
+ 	bool getAllowSleep();
+ 	void setAllowSleep(bool sleep);
+ 	
+@@ -176,6 +181,9 @@ private:
+ 	bool mAllowSleep;
+ 	bool mSleeping;
+ 	unsigned int mTimeSinceLastInput;
++	bool mIdleVideo;
++	bool mIdleSlides;
++	void updateIdlePause();
+ 
+ 	bool mRenderedHelpPrompts;
+ 
+diff --git a/es-core/src/components/SlideLayout.h b/es-core/src/components/SlideLayout.h
+index 57df82a3..56a8f9b3 100644
+--- a/es-core/src/components/SlideLayout.h
++++ b/es-core/src/components/SlideLayout.h
+@@ -126,8 +126,9 @@ namespace SlideLayout
+ 		float progress() const { return mProgress; }	// of the slide to the next capture, 0 to 1; -1 while waiting
+ 
+ 		// One frame of deltaTime ms over count captures. Only a selected item moves; a deselected one goes back
+-		// to the first capture; a paused one (screen saver, view hidden) keeps its place without moving.
+-		Request update(int deltaTime, int count, bool selected, bool paused, bool nextLoaded)
++		// to the first capture; a paused one (screen saver, view hidden) keeps its place without moving; a held
++		// one (the idle pause) ends the change under way, then stays on its capture.
++		Request update(int deltaTime, int count, bool selected, bool paused, bool nextLoaded, bool held = false)
+ 		{
+ 			if (count < 2 || !selected)
+ 			{
+@@ -157,6 +158,9 @@ namespace SlideLayout
+ 				return NONE;
+ 			}
+ 
++			if (held)
++				return NONE;
++
+ 			if (mNext < 0)
+ 			{
+ 				mNext = (mCurrent + 1) % count;
+diff --git a/es-core/src/components/SlideshowComponent.cpp b/es-core/src/components/SlideshowComponent.cpp
+index d3cf67b4..40c9571f 100644
+--- a/es-core/src/components/SlideshowComponent.cpp
++++ b/es-core/src/components/SlideshowComponent.cpp
+@@ -7,6 +7,7 @@
+ #include "utils/StringUtil.h"
+ #include "ImageIO.h"
+ #include "ThemeData.h"
++#include "Window.h"
+ 
+ SlideshowComponent::SlideshowComponent(Window* window) : GuiComponent(window),
+ 	mShown(0), mScreenSaverActive(false), mColor(0xFFFFFFFF), mSaturation(1.0f), mRoundCorners(0.0f), mRoi(0, 0, 1, 1),
+@@ -75,7 +76,8 @@ void SlideshowComponent::update(int deltaTime)
+ 	bool paused = mScreenSaverActive || !isShowing();
+ 	bool sliding = mClock.progress() >= 0;
+ 	int target = mClock.next();
+-	auto request = mClock.update(deltaTime, (int)mPaths.size(), isActive(), paused, isReady(mNextTexture));
++	bool held = mWindow->isIdlePaused(Window::IDLE_SLIDES);
++	auto request = mClock.update(deltaTime, (int)mPaths.size(), isActive(), paused, isReady(mNextTexture), held);
+ 
+ 	if (mClock.current() != mShown)
+ 	{
+diff --git a/es-core/src/components/SlideshowComponent.h b/es-core/src/components/SlideshowComponent.h
+index 41e007ca..e70c1e02 100644
+--- a/es-core/src/components/SlideshowComponent.h
++++ b/es-core/src/components/SlideshowComponent.h
+@@ -14,7 +14,8 @@ class TextureResource;
+ // <slideshow>: captures shown one at a time at whole-pixel scales (SlideLayout::fit). In a grid's item
+ // template it moves only on the selected item: every <interval> seconds the next capture slides in from
+ // the right in <duration> seconds, with dots for the position; the other items show the first capture.
+-// <path> lists the captures, one per line ("{system:slides}" on the system grid).
++// <path> lists the captures, one per line ("{system:slides}" on the system grid). It stops with the idle pause
++// (Window::isIdlePaused).
+ class SlideshowComponent : public GuiComponent
+ {
+ public:
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 7deec7a3..2c15ba88 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -67,6 +67,8 @@ VideoComponent::VideoComponent(Window* window) :
+ 	mIsTopWindow(true),
+ 	mEnabled(true),
+ 	mScreensaverMode(false),
++	mIdlePause(false),
++	mIdleStopped(false),
+ 	mTargetIsMax(false),
+ 	mTargetIsMin(false),
+ 	mTargetSize(0, 0),
+@@ -247,7 +249,7 @@ void VideoComponent::renderSnapshot(const Transform4x4f& parentTrans)
+ {
+ 	// This is the case where the video is not currently being displayed. Work out
+ 	// if we need to display a static image
+-	if ((mConfig.showSnapshotNoVideo && (mVideoPath.empty() || isUnplayable(mVideoPath))) || ((mStartDelayed || mFadeIn < 1.0) && mConfig.showSnapshotDelay))
++	if ((mConfig.showSnapshotNoVideo && (mVideoPath.empty() || isUnplayable(mVideoPath) || mIdleStopped)) || ((mStartDelayed || mFadeIn < 1.0 || mIdleStopped) && mConfig.showSnapshotDelay))
+ 	{
+ 		float t = 1.0 - mFadeIn;
+ 		t -= 1; // cubic ease out
+@@ -281,6 +283,8 @@ void VideoComponent::renderSnapshot(const Transform4x4f& parentTrans)
+ 
+ void VideoComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, const std::string& view, const std::string& element, unsigned int properties)
+ {
++	mIdlePause = true;
++
+ 	using namespace ThemeFlags;
+ 
+ 	const ThemeData::ThemeElement* elem = theme->getElement(view, element, "video");
+@@ -505,6 +509,15 @@ void VideoComponent::manageState()
+ 	if (!show)
+ 		mStartDelayed = false;
+ 
++	// Stopped by the idle pause at the end of a loop: it starts again on input, or as another video
++	if (mIdleStopped)
++	{
++		if (show && mVideoPath == mPlayingVideoPath && mWindow->isIdlePaused(Window::IDLE_VIDEO))
++			return;
++
++		mIdleStopped = false;
++	}
++
+ 	// See if we're already playing
+ 	if (mIsPlaying || mIsWaitingForVideoToStart)
+ 	{
+diff --git a/es-core/src/components/VideoComponent.h b/es-core/src/components/VideoComponent.h
+index 97127163..403a765d 100644
+--- a/es-core/src/components/VideoComponent.h
++++ b/es-core/src/components/VideoComponent.h
+@@ -217,6 +217,8 @@ protected:
+ 	bool							mIsPlaying;		
+ 	bool							mScreensaverActive;
+ 	bool							mScreensaverMode;
++	bool							mIdlePause;		// a theme's video: stops for the idle pause (Window::isIdlePaused)
++	bool							mIdleStopped;	// stopped by it at the end of a loop, until input
+ 	bool							mTargetIsMax;
+ 	bool							mTargetIsMin;
+ 
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 2f131ef3..8ba398d2 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -5,6 +5,7 @@
+ #include "utils/StringUtil.h"
+ #include "PowerSaver.h"
+ #include "Settings.h"
++#include "Window.h"
+ #include <vlc/vlc.h>
+ #include <SDL_mutex.h>
+ #include <cmath>
+@@ -704,6 +705,15 @@ void VideoVlcComponent::handleLooping()
+ 				}
+ 			}
+ 
++			// The idle pause: a view's video ends its loop on its capture, and the panel moves on to no other
++			if (mIdlePause && !mScreensaverMode && mWindow->isIdlePaused(Window::IDLE_VIDEO))
++			{
++				stopVideo();
++				mFadeIn = 0.0;
++				mIdleStopped = true;
++				return;
++			}
++
+ 			if (mPlaylist != nullptr)
+ 			{
+ 				auto nextVideo = mPlaylist->getNextItem();

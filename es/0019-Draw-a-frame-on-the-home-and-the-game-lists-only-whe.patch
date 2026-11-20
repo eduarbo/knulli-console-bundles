@@ -1,0 +1,761 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 23:58:41 +0000
+Subject: [PATCH] Draw a frame on the home and the game lists only when it
+ changes
+
+- With RenderOnChange (default true) and only the view on the stack, the
+  renderer keeps the frame's drawing as commands instead of sending them.
+  At the frame's end they are sent and shown only when they differ from the
+  frame on screen, or use a texture changed since (a video's new frame), and
+  at least once a second; otherwise the screen keeps its frame and the main
+  loop waits for the next frame's time or an event, so input is answered at
+  once. Texture changes, read-backs (shaders, blur) and swaps inside a frame
+  send what was kept first: the order of the drawing never changes.
+- RenderOnChangeVerify draws every frame, reads it back, and logs a frame
+  the cache would have left out whose pixels changed (for tests);
+  DrawFramerate also shows the frames drawn per second.
+---
+ THEMES.md                                 |   8 +
+ es-app/src/main.cpp                       |  29 +-
+ es-core/src/Settings.cpp                  |   2 +
+ es-core/src/Window.cpp                    |  11 +-
+ es-core/src/Window.h                      |   5 +
+ es-core/src/renderers/Renderer.cpp        | 401 +++++++++++++++++++++-
+ es-core/src/renderers/Renderer.h          |  11 +
+ es-core/src/renderers/Renderer_GLES20.cpp |   6 +
+ es-core/src/renderers/Renderer_GLES20.h   |   1 +
+ 9 files changed, 458 insertions(+), 16 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index ad88360a..388e4b0d 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1203,6 +1203,14 @@ dots over them.
+       (default 4 px at 480), `dotsOffset` the distance of the row from the element's top-right corner, as
+       fractions of the screen (default 9 px, 9 px). The current dot is wider.
+ 
++##### Drawing only what changes
++
++With `RenderOnChange` (es_settings, default true), the home and the game lists, with nothing over them, draw
++and show a frame only when it differs from the frame on screen or a texture it uses changed (a video's new
++frame), and at least once a second; otherwise the screen keeps its frame and ES waits for the next frame's time
++or an event. `RenderOnChangeVerify` (for tests) draws every frame and logs any frame the cache would have left
++out whose pixels changed; `DrawFramerate` shows the frames drawn per second.
++
+ #### rating
+ 
+ * `pos` - type: NORMALIZED_PAIR.
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 2c2ebb35..2e58cf61 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -14,12 +14,15 @@
+ #include "Genres.h"
+ #include "utils/Platform.h"
+ #include "PowerSaver.h"
++#include "math/Misc.h"
++#include "renderers/Renderer.h"
+ #include "Settings.h"
+ #include "SystemData.h"
+ #include "SystemScreenSaver.h"
+ #include <SDL_events.h>
+ #include <SDL_main.h>
+ #include <SDL_timer.h>
++#include <SDL_video.h>
+ #include <iostream>
+ #include <time.h>
+ #include "LocaleES.h"
+@@ -669,10 +672,19 @@ int main(int argc, char* argv[])
+ 	int lastTime = SDL_GetTicks();
+ 	int ps_time = SDL_GetTicks();
+ 
++	// How long a frame shows on the display: a frame not drawn (RenderOnChange) waits that long instead
++	int frameTime = 16;
++	{
++		SDL_DisplayMode displayMode;
++		if (Renderer::getSDLWindow() != nullptr && SDL_GetWindowDisplayMode(Renderer::getSDLWindow(), &displayMode) == 0 && displayMode.refresh_rate > 0)
++			frameTime = Math::max(1, 1000 / displayMode.refresh_rate);
++	}
++
+ 	bool running = true;
+ 
+ 	while(running)
+ 	{
++		int frameStart = SDL_GetTicks();
+ #ifdef WIN32	
+ 		int processStart = SDL_GetTicks();
+ #endif
+@@ -732,6 +744,12 @@ int main(int argc, char* argv[])
+ 			deltaTime = 1000;
+ 
+ 		TRYCATCH("Window.update" ,window.update(deltaTime))	
++
++		// The home and the game lists draw a frame only when it changes
++		bool onlyChanges = window.drawsOnlyChanges();
++		if (onlyChanges)
++			Renderer::beginFrame();
++
+ 		TRYCATCH("Window.render", window.render())
+ 
+ /*
+@@ -746,7 +764,16 @@ int main(int argc, char* argv[])
+ #endif
+ */
+ 
+-		Renderer::swapBuffers();
++		if (!onlyChanges)
++			Renderer::swapBuffers();
++		else if (!Renderer::endFrame())
++		{
++			// The screen keeps its frame: wait as long as showing one would have, or until an event (input is
++			// answered at once)
++			int spent = (int)SDL_GetTicks() - frameStart;
++			if (spent >= 0 && spent < frameTime)
++				SDL_WaitEventTimeout(nullptr, frameTime - spent);
++		}
+ 
+ 		Log::flush();
+ 	}
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 56930d51..aa459a53 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -122,6 +122,8 @@ void Settings::setDefaults()
+ 	mBoolMap["IgnoreLeadingArticles"] = Settings::_IgnoreLeadingArticles;
+ 	mBoolMap["ShowFoldersFirst"] = Settings::_ShowFoldersFirst;
+ 	mBoolMap["DrawFramerate"] = false;
++	mBoolMap["RenderOnChange"] = true;
++	mBoolMap["RenderOnChangeVerify"] = false;
+ 	mBoolMap["ScrollLoadMedias"] = false;	
+ 	mBoolMap["ShowExit"] = true;
+ 	mBoolMap["ExitOnRebootRequired"] = false;
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index 0923d442..ebe1ba53 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -31,7 +31,7 @@
+ #include <SDL_syswm.h>
+ #endif
+ 
+-Window::Window() : mNormalizeNextUpdate(false), mFrameTimeElapsed(0), mFrameCountElapsed(0), mAverageDeltaTime(10),
++Window::Window() : mNormalizeNextUpdate(false), mFrameTimeElapsed(0), mFrameCountElapsed(0), mFrameDrawnStart(0), mAverageDeltaTime(10),
+   mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mScreenSaver(NULL), mRenderScreenSaver(false), mClockElapsed(0), mMouseCapture(nullptr), mMenuBackgroundShaderTextureCache(-1)
+ {			
+ 	mTransitionOffset = 0;
+@@ -474,9 +474,10 @@ void Window::update(int deltaTime)
+ 		{
+ 			std::stringstream ss;
+ 
+-			// fps
++			// fps, and the frames drawn (RenderOnChange draws only those that change)
+ 			ss << std::fixed << std::setprecision(1) << (1000.0f * (float)mFrameCountElapsed / (float)mFrameTimeElapsed) << "fps, ";
+ 			ss << std::fixed << std::setprecision(2) << ((float)mFrameTimeElapsed / (float)mFrameCountElapsed) << "ms";
++			ss << ", " << std::fixed << std::setprecision(1) << (1000.0f * (float)(Renderer::getCurrentFrame() - mFrameDrawnStart) / (float)mFrameTimeElapsed) << " drawn/s";
+ 
+ 			// vram
+ 			float textureVramUsageMb = TextureResource::getTotalMemUsage(false) / 1024.0f / 1024.0f;
+@@ -491,6 +492,7 @@ void Window::update(int deltaTime)
+ 
+ 		mFrameTimeElapsed = 0;
+ 		mFrameCountElapsed = 0;
++		mFrameDrawnStart = Renderer::getCurrentFrame();
+ 	}
+ 
+ 	/* draw the clock */ 
+@@ -922,6 +924,11 @@ void Window::render()
+ 	}
+ }
+ 
++bool Window::drawsOnlyChanges()
++{
++	return mGuiStack.size() == 1 && !mRenderScreenSaver && !mSleeping && Settings::getInstance()->getBool("RenderOnChange");
++}
++
+ void Window::normalizeNextUpdate()
+ {
+ 	mNormalizeNextUpdate = true;
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 59271580..7e07bd88 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -67,6 +67,10 @@ public:
+ 	void normalizeNextUpdate();
+ 
+ 	inline bool isSleeping() const { return mSleeping; }
++
++	// The home and the game lists, with nothing over them, draw a frame only when it changes
++	// (Settings "RenderOnChange")
++	bool drawsOnlyChanges();
+ 	bool getAllowSleep();
+ 	void setAllowSleep(bool sleep);
+ 	
+@@ -153,6 +157,7 @@ private:
+ 
+ 	int mFrameTimeElapsed;
+ 	int mFrameCountElapsed;
++	int mFrameDrawnStart;
+ 	int mAverageDeltaTime;
+ 
+ 	std::unique_ptr<TextCache> mFrameDataText;
+diff --git a/es-core/src/renderers/Renderer.cpp b/es-core/src/renderers/Renderer.cpp
+index 540ed0f6..ff3d24ac 100644
+--- a/es-core/src/renderers/Renderer.cpp
++++ b/es-core/src/renderers/Renderer.cpp
+@@ -13,6 +13,7 @@
+ #include "utils/StringUtil.h"
+ 
+ #include <SDL.h>
++#include <set>
+ #include <stack>
+ 
+ #if WIN32
+@@ -829,6 +830,290 @@ namespace Renderer
+ 		return _instance;
+ 	}
+ 
++	//////////////////////////////////////////////////////////////////////////
++	// A frame drawn only when it changes (beginFrame, endFrame): its drawing is kept as commands, and
++	// sent and shown only when they differ from the frame on screen or use a texture that changed since.
++	// Texture changes always run at once; the commands kept before one are sent first, so the order of
++	// the drawing never changes, and the frame is then shown whatever it holds.
++
++	namespace FrameCache
++	{
++		struct Command
++		{
++			enum Type { BIND, LINES, STRIPS, FAN, SOLID, MATRIX, PROJECTION, VIEWPORT, SCISSOR, STENCIL, NO_STENCIL, READ_BACK };
++
++			Type          type;
++			unsigned int  texture;		// BIND
++			Blend::Factor src, dst;		// LINES, STRIPS, FAN
++			size_t        first, count;	// LINES, STRIPS, FAN, STENCIL: Frame::vertices
++			float         values[16];	// MATRIX, PROJECTION; SOLID: x y w h borderWidth cornerRadius
++			unsigned int  colors[2];	// SOLID
++			Rect          rect;			// VIEWPORT, SCISSOR
++			std::string   shader;		// READ_BACK: what it ran (it ran at once)
++		};
++
++		// The state a frame starts in: its first commands may rely on it
++		struct State
++		{
++			unsigned int texture;
++			float        matrix[16];
++			bool         hasMatrix;
++		};
++
++		struct Frame
++		{
++			State                start;
++			std::vector<Command> commands;
++			std::vector<Vertex>  vertices;
++		};
++
++		static bool                   recording = false;
++		static size_t                 sent = 0;			// commands of the frame already sent
++		static bool                   mustShow = false;	// part of it was sent, or it cannot be compared
++		static bool                   shownValid = false;
++		static unsigned int           shownAt = 0;		// SDL ticks
++		// The frame on screen is drawn again at least this often, in case something else changed the screen
++		// (a display that lost its contents)
++		static const unsigned int     REFRESH_MS = 1000;
++		static Frame                  frame, shown;
++		static std::set<unsigned int> changedTextures;		// created, updated or deleted since the shown frame
++		static State                  state = { 0, { 0 }, false };
++
++		static void copyMatrix(float* out, const Transform4x4f& matrix)
++		{
++			memcpy(out, &matrix, sizeof(float) * 16);
++		}
++
++		static bool sameVertex(const Vertex& a, const Vertex& b)
++		{
++			return memcmp(&a.pos, &b.pos, sizeof(Vector2f)) == 0 && memcmp(&a.tex, &b.tex, sizeof(Vector2f)) == 0 && a.col == b.col &&
++				memcmp(&a.saturation, &b.saturation, sizeof(float)) == 0 && memcmp(&a.cornerRadius, &b.cornerRadius, sizeof(float)) == 0;
++		}
++
++		static bool sameCommand(const Command& a, const Frame& fa, const Command& b, const Frame& fb)
++		{
++			if (a.type != b.type)
++				return false;
++
++			switch (a.type)
++			{
++			case Command::BIND:
++				return a.texture == b.texture;
++
++			case Command::LINES:
++			case Command::STRIPS:
++			case Command::FAN:
++			case Command::STENCIL:
++				if (a.count != b.count || a.src != b.src || a.dst != b.dst)
++					return false;
++
++				for (size_t i = 0; i < a.count; i++)
++					if (!sameVertex(fa.vertices[a.first + i], fb.vertices[b.first + i]))
++						return false;
++
++				return true;
++
++			case Command::MATRIX:
++			case Command::PROJECTION:
++				return memcmp(a.values, b.values, sizeof(float) * 16) == 0;
++
++			case Command::SOLID:
++				return memcmp(a.values, b.values, sizeof(float) * 6) == 0 && a.colors[0] == b.colors[0] && a.colors[1] == b.colors[1];
++
++			case Command::VIEWPORT:
++			case Command::SCISSOR:
++				return a.rect.x == b.rect.x && a.rect.y == b.rect.y && a.rect.w == b.rect.w && a.rect.h == b.rect.h;
++
++			case Command::NO_STENCIL:
++				return true;
++
++			case Command::READ_BACK:
++				return false;
++			}
++
++			return false;
++		}
++
++		static bool sameAsShown()
++		{
++			if (!shownValid || frame.commands.size() != shown.commands.size())
++				return false;
++
++			if (frame.start.texture != shown.start.texture || frame.start.hasMatrix != shown.start.hasMatrix ||
++				memcmp(frame.start.matrix, shown.start.matrix, sizeof(float) * 16) != 0)
++				return false;
++
++			for (size_t i = 0; i < frame.commands.size(); i++)
++				if (!sameCommand(frame.commands[i], frame, shown.commands[i], shown))
++					return false;
++
++			return true;
++		}
++
++		static bool usesChangedTexture()
++		{
++			if (changedTextures.empty())
++				return false;
++
++			if (changedTextures.find(frame.start.texture) != changedTextures.cend())
++				return true;
++
++			for (auto& command : frame.commands)
++				if (command.type == Command::BIND && changedTextures.find(command.texture) != changedTextures.cend())
++					return true;
++
++			return false;
++		}
++
++		static Command& add(Command::Type type)
++		{
++			frame.commands.push_back(Command());
++			Command& command = frame.commands.back();
++			command.type = type;
++			command.texture = 0;
++			command.src = Blend::SRC_ALPHA;
++			command.dst = Blend::ONE_MINUS_SRC_ALPHA;
++			command.first = 0;
++			command.count = 0;
++			return command;
++		}
++
++		static void addVertices(Command& command, const Vertex* vertices, unsigned int count)
++		{
++			command.first = frame.vertices.size();
++			command.count = count;
++			frame.vertices.insert(frame.vertices.end(), vertices, vertices + count);
++
++			// A custom shader is given the frame's number: the same commands do not draw the same frame
++			for (unsigned int i = 0; i < count; i++)
++				if (vertices[i].customShader != nullptr)
++					mustShow = true;
++		}
++
++		// Sends the commands not sent yet, in order
++		static void send()
++		{
++			for (; sent < frame.commands.size(); sent++)
++			{
++				const Command& c = frame.commands[sent];
++				const Vertex* vertices = c.count ? &frame.vertices[c.first] : nullptr;
++
++				switch (c.type)
++				{
++				case Command::BIND:       Instance()->bindTexture(c.texture); break;
++				case Command::LINES:      Instance()->drawLines(vertices, c.count, c.src, c.dst); break;
++				case Command::STRIPS:     Instance()->drawTriangleStrips(vertices, c.count, c.src, c.dst, true); break;
++				case Command::FAN:        Instance()->drawTriangleFan(vertices, c.count, c.src, c.dst); break;
++				case Command::SOLID:      Instance()->drawSolidRectangle(c.values[0], c.values[1], c.values[2], c.values[3], c.colors[0], c.colors[1], c.values[4], c.values[5]); break;
++				case Command::MATRIX:     Instance()->setMatrix(*(const Transform4x4f*)c.values); break;
++				case Command::PROJECTION: Instance()->setProjection(*(const Transform4x4f*)c.values); break;
++				case Command::VIEWPORT:   Instance()->setViewport(c.rect); break;
++				case Command::SCISSOR:    Instance()->setScissor(c.rect); break;
++				case Command::STENCIL:    Instance()->setStencil(vertices, c.count); break;
++				case Command::NO_STENCIL: Instance()->disableStencil(); break;
++				case Command::READ_BACK:  break;
++				}
++			}
++		}
++
++		// Before anything that must run at once: what was kept is sent, and the frame will be shown
++		static void sendNow()
++		{
++			if (!recording)
++				return;
++
++			send();
++			mustShow = true;
++		}
++
++		static void textureChanged(unsigned int texture)
++		{
++			sendNow();
++			changedTextures.insert(texture);
++		}
++
++		// The check of the cache (Settings "RenderOnChangeVerify", for tests): every frame is drawn and read
++		// back, and a frame the cache would have left out must have the pixels of the frame before it
++		static bool                       verify = false;
++		static std::vector<unsigned char> lastPixels, pixels;
++		static int                        judgedSame = 0, differed = 0, drawnSame = 0, checked = 0;
++
++		static void verifyFrame(bool same)
++		{
++			int w = getWindowWidth(), h = getWindowHeight();
++			pixels.resize((size_t)w * h * 4);
++			if (!Instance()->readPixels(0, 0, w, h, pixels.data()))
++				return;
++
++			if (lastPixels.size() == pixels.size())
++			{
++				size_t changed = 0;
++				for (size_t i = 0; i < pixels.size(); i += 4)
++					if (memcmp(&pixels[i], &lastPixels[i], 4) != 0)
++						changed++;
++
++				if (same)
++					judgedSame++;
++				else if (changed == 0)
++					drawnSame++;
++
++				if (same && changed > 0)
++				{
++					differed++;
++					LOG(LogError) << "RenderOnChangeVerify: a frame left out would have changed " << changed << " pixels";
++				}
++			}
++
++			std::swap(pixels, lastPixels);
++
++			if (++checked % 300 == 0)
++				LOG(LogInfo) << "RenderOnChangeVerify: " << checked << " frames, " << judgedSame << " left out, " << differed << " of them changed; " << drawnSame << " drawn the same as the one before";
++		}
++	}
++
++	void beginFrame()
++	{
++		using namespace FrameCache;
++
++		frame.commands.clear();
++		frame.vertices.clear();
++		frame.start = state;
++		sent = 0;
++		mustShow = false;
++		recording = true;
++		verify = Settings::getInstance()->getBool("RenderOnChangeVerify");
++	}
++
++	bool endFrame()
++	{
++		using namespace FrameCache;
++
++		if (!recording)
++			return false;
++
++		recording = false;
++
++		bool same = !mustShow && SDL_GetTicks() - shownAt < REFRESH_MS && sameAsShown() && !usesChangedTexture();
++		if (same && !verify)
++			return false;
++
++		send();
++
++		if (verify)
++			verifyFrame(same);
++
++		swapBuffers();
++		std::swap(frame, shown);
++		shownValid = true;
++		shownAt = SDL_GetTicks();
++		return true;
++	}
++
++	void invalidateFrame()
++	{
++		FrameCache::shownValid = false;
++	}
++
+ 	//////////////////////////////////////////////////////////////////////////
+ 	std::string getDriverName()
+ 	{
+@@ -867,42 +1152,88 @@ namespace Renderer
+ 
+ 	unsigned int createTexture(const Texture::Type _type, const bool _linear, const bool _repeat, const unsigned int _width, const unsigned int _height, void* _data)
+ 	{
+-		return Instance()->createTexture(_type, _linear, _repeat, _width, _height, _data);
++		FrameCache::sendNow();
++
++		unsigned int texture = Instance()->createTexture(_type, _linear, _repeat, _width, _height, _data);
++		FrameCache::changedTextures.insert(texture);
++		FrameCache::state.texture = texture;	// left bound
++		return texture;
+ 	}
+ 
+ 	void  destroyTexture(const unsigned int _texture)
+ 	{
++		FrameCache::textureChanged(_texture);
+ 		Instance()->destroyTexture(_texture);
+ 	}
+ 
+ 	void updateTexture(const unsigned int _texture, const Texture::Type _type, const unsigned int _x, const unsigned _y, const unsigned int _width, const unsigned int _height, void* _data)
+ 	{
++		FrameCache::textureChanged(_texture);
+ 		Instance()->updateTexture(_texture, _type, _x, _y, _width, _height, _data);
++		FrameCache::state.texture = 0;	// left unbound
+ 	}
+ 
+ 	void bindTexture(const unsigned int _texture)
+ 	{
+-		Instance()->bindTexture(_texture);
++		FrameCache::state.texture = _texture;
++
++		if (FrameCache::recording)
++			FrameCache::add(FrameCache::Command::BIND).texture = _texture;
++		else
++			Instance()->bindTexture(_texture);
+ 	}
+ 
+ 	void drawLines(const Vertex* _vertices, const unsigned int _numVertices, const Blend::Factor _srcBlendFactor, const Blend::Factor _dstBlendFactor)
+ 	{
+-		Instance()->drawLines(_vertices, _numVertices, _srcBlendFactor, _dstBlendFactor);
++		if (FrameCache::recording)
++		{
++			auto& command = FrameCache::add(FrameCache::Command::LINES);
++			command.src = _srcBlendFactor;
++			command.dst = _dstBlendFactor;
++			FrameCache::addVertices(command, _vertices, _numVertices);
++		}
++		else
++			Instance()->drawLines(_vertices, _numVertices, _srcBlendFactor, _dstBlendFactor);
+ 	}
+ 
+ 	void drawTriangleStrips(const Vertex* _vertices, const unsigned int _numVertices, const Blend::Factor _srcBlendFactor, const Blend::Factor _dstBlendFactor, bool verticesChanged)
+ 	{
+-		Instance()->drawTriangleStrips(_vertices, _numVertices, _srcBlendFactor, _dstBlendFactor, verticesChanged);
++		if (FrameCache::recording)
++		{
++			auto& command = FrameCache::add(FrameCache::Command::STRIPS);
++			command.src = _srcBlendFactor;
++			command.dst = _dstBlendFactor;
++			FrameCache::addVertices(command, _vertices, _numVertices);
++		}
++		else
++			Instance()->drawTriangleStrips(_vertices, _numVertices, _srcBlendFactor, _dstBlendFactor, verticesChanged);
+ 	}
+ 
+ 	void drawSolidRectangle(const float _x, const float _y, const float _w, const float _h, const unsigned int _fillColor, const unsigned int _borderColor, float borderWidth, float cornerRadius)
+ 	{
+-		Instance()->drawSolidRectangle(_x, _y, _w, _h, _fillColor, _borderColor, borderWidth, cornerRadius);
++		if (FrameCache::recording)
++		{
++			auto& command = FrameCache::add(FrameCache::Command::SOLID);
++			float values[6] = { _x, _y, _w, _h, borderWidth, cornerRadius };
++			memcpy(command.values, values, sizeof(values));
++			command.colors[0] = _fillColor;
++			command.colors[1] = _borderColor;
++		}
++		else
++			Instance()->drawSolidRectangle(_x, _y, _w, _h, _fillColor, _borderColor, borderWidth, cornerRadius);
+ 	}
+ 
+ 	void drawTriangleFan(const Vertex* _vertices, const unsigned int _numVertices, const Blend::Factor _srcBlendFactor, const Blend::Factor _dstBlendFactor)
+ 	{
+-		Instance()->drawTriangleFan(_vertices, _numVertices, _srcBlendFactor, _dstBlendFactor);
++		if (FrameCache::recording)
++		{
++			auto& command = FrameCache::add(FrameCache::Command::FAN);
++			command.src = _srcBlendFactor;
++			command.dst = _dstBlendFactor;
++			FrameCache::addVertices(command, _vertices, _numVertices);
++		}
++		else
++			Instance()->drawTriangleFan(_vertices, _numVertices, _srcBlendFactor, _dstBlendFactor);
+ 	}
+ 
+ 	bool shaderSupportsCornerSize(const std::string& shader)
+@@ -917,23 +1248,40 @@ namespace Renderer
+ 
+ 	void setProjection(const Transform4x4f& _projection)
+ 	{
+-		Instance()->setProjection(_projection);
++		if (FrameCache::recording)
++			FrameCache::copyMatrix(FrameCache::add(FrameCache::Command::PROJECTION).values, _projection);
++		else
++			Instance()->setProjection(_projection);
+ 	}
+ 
+ 	void setMatrix(const Transform4x4f& _matrix)
+ 	{
+-		Instance()->setMatrix(_matrix);
++		FrameCache::copyMatrix(FrameCache::state.matrix, _matrix);
++		FrameCache::state.hasMatrix = true;
++
++		if (FrameCache::recording)
++			FrameCache::copyMatrix(FrameCache::add(FrameCache::Command::MATRIX).values, _matrix);
++		else
++			Instance()->setMatrix(_matrix);
+ 	}
+ 
+ 	void blurBehind(const float _x, const float _y, const float _w, const float _h, const float blurSize)
+ 	{
+ 		std::map<std::string, std::string> map;
+ 		map["blur"] = std::to_string(blurSize);
+-		Instance()->postProcessShader(":/shaders/blur.glsl", _x, _y, _w, _h, map);		
++		postProcessShader(":/shaders/blur.glsl", _x, _y, _w, _h, map);
+ 	}
+ 
+ 	void postProcessShader(const std::string& path, const float _x, const float _y, const float _w, const float _h, const std::map<std::string, std::string>& parameters, unsigned int* data)
+ 	{
++		// It reads back what is drawn: it runs at once, after what was kept
++		if (FrameCache::recording)
++		{
++			FrameCache::sendNow();
++			FrameCache::add(FrameCache::Command::READ_BACK).shader = path;
++			FrameCache::sent = FrameCache::frame.commands.size();
++		}
++
+ 		Instance()->postProcessShader(path, _x, _y, _w, _h, parameters, data);
+ 	}
+ 
+@@ -945,22 +1293,35 @@ namespace Renderer
+ 	void setViewport(const Rect& _viewport)
+ 	{
+ 		viewPort = _viewport;
+-		Instance()->setViewport(_viewport);
++
++		if (FrameCache::recording)
++			FrameCache::add(FrameCache::Command::VIEWPORT).rect = _viewport;
++		else
++			Instance()->setViewport(_viewport);
+ 	}
+ 
+ 	void setScissor(const Rect& _scissor)
+ 	{
+-		Instance()->setScissor(_scissor);
++		if (FrameCache::recording)
++			FrameCache::add(FrameCache::Command::SCISSOR).rect = _scissor;
++		else
++			Instance()->setScissor(_scissor);
+ 	}
+ 
+ 	void setStencil(const Vertex* _vertices, const unsigned int _numVertices)
+ 	{
+-		Instance()->setStencil(_vertices, _numVertices);
++		if (FrameCache::recording)
++			FrameCache::addVertices(FrameCache::add(FrameCache::Command::STENCIL), _vertices, _numVertices);
++		else
++			Instance()->setStencil(_vertices, _numVertices);
+ 	}
+ 
+ 	void disableStencil()
+ 	{
+-		Instance()->disableStencil();
++		if (FrameCache::recording)
++			FrameCache::add(FrameCache::Command::NO_STENCIL);
++		else
++			Instance()->disableStencil();
+ 	}
+ 
+ 	void setSwapInterval()
+@@ -970,6 +1331,20 @@ namespace Renderer
+ 
+ 	void swapBuffers() 
+ 	{
++		// A swap inside a frame (a splash screen): what was kept is shown with it, and the frame after it
++		if (FrameCache::recording)
++		{
++			FrameCache::sendNow();
++			FrameCache::add(FrameCache::Command::READ_BACK).shader = "swap";
++			FrameCache::sent = FrameCache::frame.commands.size();
++		}
++		else
++		{
++			// What is on screen now: the textures it uses are as they are
++			FrameCache::shownValid = false;
++			FrameCache::changedTextures.clear();
++		}
++
+ 		currentFrame++;
+ 		Instance()->swapBuffers();
+ 	}
+diff --git a/es-core/src/renderers/Renderer.h b/es-core/src/renderers/Renderer.h
+index 8e13b5bf..5bd7d162 100644
+--- a/es-core/src/renderers/Renderer.h
++++ b/es-core/src/renderers/Renderer.h
+@@ -137,6 +137,9 @@ namespace Renderer
+ 
+ 		virtual size_t		 getTotalMemUsage() { return (size_t) -1; };
+ 
++		// What is drawn so far in the frame, as RGBA rows from the bottom; false when the renderer cannot
++		virtual bool		 readPixels(int _x, int _y, int _w, int _h, unsigned char* _rgba) { return false; };
++
+ 		virtual bool		 supportShaders() { return false; }
+ 		virtual bool		 shaderSupportsCornerSize(const std::string& shader) { return false; };
+ 	};
+@@ -200,6 +203,14 @@ namespace Renderer
+ 	void         setSwapInterval   ();
+ 	void         swapBuffers       ();
+ 
++	// A frame drawn only when it changes: what is drawn between beginFrame and endFrame is kept, and
++	// endFrame draws and shows it only when it differs from the frame on screen (or a texture it uses
++	// changed since); false when the screen keeps the frame it shows
++	void         beginFrame        ();
++	bool         endFrame          ();
++	// The next frame is drawn whatever it holds (the screen may have lost the one it showed)
++	void         invalidateFrame   ();
++
+ 	void		 blurBehind		   (const float _x, const float _y, const float _w, const float _h, const float blurSize = 4.0f);
+ 	void		 postProcessShader (const std::string& path, const float _x, const float _y, const float _w, const float _h, const std::map<std::string, std::string>& parameters, unsigned int* data = nullptr);
+ 
+diff --git a/es-core/src/renderers/Renderer_GLES20.cpp b/es-core/src/renderers/Renderer_GLES20.cpp
+index 2a48c5c3..4be4e4ce 100644
+--- a/es-core/src/renderers/Renderer_GLES20.cpp
++++ b/es-core/src/renderers/Renderer_GLES20.cpp
+@@ -1117,6 +1117,12 @@ namespace Renderer
+ 		glDisable(GL_STENCIL_TEST);
+ 	}
+ 
++	bool GLES20Renderer::readPixels(int _x, int _y, int _w, int _h, unsigned char* _rgba)
++	{
++		GL_CHECK_ERROR(glReadPixels(_x, _y, _w, _h, GL_RGBA, GL_UNSIGNED_BYTE, _rgba));
++		return true;
++	}
++
+ 	size_t GLES20Renderer::getTotalMemUsage()
+ 	{
+ 		size_t total = 0;
+diff --git a/es-core/src/renderers/Renderer_GLES20.h b/es-core/src/renderers/Renderer_GLES20.h
+index 27e361b9..5115c8be 100644
+--- a/es-core/src/renderers/Renderer_GLES20.h
++++ b/es-core/src/renderers/Renderer_GLES20.h
+@@ -53,6 +53,7 @@ namespace Renderer
+ 		void		 postProcessShader(const std::string& path, const float _x, const float _y, const float _w, const float _h, const std::map<std::string, std::string>& parameters, unsigned int* data = nullptr);
+ 
+ 		size_t		 getTotalMemUsage() override;
++		bool		 readPixels(int _x, int _y, int _w, int _h, unsigned char* _rgba) override;
+ 
+ 		bool		 supportShaders() { return true; }
+ 		bool		 shaderSupportsCornerSize(const std::string& shader) override;

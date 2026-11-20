@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 03:18:47 +0000
+Subject: [PATCH] Give a theme's snapshot the video's bound colour and
+ saturation
+
+- A snapshot the theme gives took the video's colour and saturation from
+  the theme only: a bound one (a capture filtered by its system) reached
+  the video, not the picture before it, which then changed tint when the
+  video replaced it. The video's setters pass them on as well.
+---
+ es-core/src/components/VideoComponent.cpp    | 4 +++-
+ es-core/src/components/VideoComponent.h      | 1 +
+ es-core/src/components/VideoVlcComponent.cpp | 7 +++++++
+ 3 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 6eb6d384..5b171040 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -68,6 +68,7 @@ VideoComponent::VideoComponent(Window* window) :
+ 	mEnabled(true),
+ 	mScreensaverMode(false),
+ 	mIdlePause(false),
++	mThemeSnapshot(false),
+ 	mIdleStopped(false),
+ 	mTargetIsMax(false),
+ 	mTargetIsMin(false),
+@@ -381,7 +382,8 @@ void VideoComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, const s
+ 
+ 	// The theme's snapshot (a capture, usually bound to the game): shown until the video plays, and in its
+ 	// place when there is none, with the video's colour and saturation; once the video plays it replaces it
+-	if (elem->has("snapshot"))
++	mThemeSnapshot = elem->has("snapshot");
++	if (mThemeSnapshot)
+ 	{
+ 		if (!elem->has("snapshot_binding"))
+ 			setImage(elem->get<std::string>("snapshot"));
+diff --git a/es-core/src/components/VideoComponent.h b/es-core/src/components/VideoComponent.h
+index 403a765d..91ccb2f2 100644
+--- a/es-core/src/components/VideoComponent.h
++++ b/es-core/src/components/VideoComponent.h
+@@ -219,6 +219,7 @@ protected:
+ 	bool							mScreensaverMode;
+ 	bool							mIdlePause;		// a theme's video: stops for the idle pause (Window::isIdlePaused)
+ 	bool							mIdleStopped;	// stopped by it at the end of a loop, until input
++	bool							mThemeSnapshot;	// the theme gives the snapshot ("snapshot"): it takes the video's colour and saturation
+ 	bool							mTargetIsMax;
+ 	bool							mTargetIsMin;
+ 
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 202a7c41..7625b0d4 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -479,6 +479,10 @@ void VideoVlcComponent::onPaddingChanged()
+ void VideoVlcComponent::setColorShift(unsigned int color)
+ {
+ 	mColorShift = color;
++
++	// A bound colour too: the picture the video replaces looks as the video
++	if (mThemeSnapshot)
++		mStaticImage.setColorShift(color);
+ }
+ 
+ void VideoVlcComponent::updateVertices()
+@@ -1458,4 +1462,7 @@ bool VideoVlcComponent::isPaused()
+ void VideoVlcComponent::setSaturation(float saturation)
+ {
+ 	mSaturation = saturation;
++
++	if (mThemeSnapshot)
++		mStaticImage.setSaturation(saturation);
+ }

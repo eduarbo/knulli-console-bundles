@@ -1,0 +1,322 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 17:35:41 +0000
+Subject: [PATCH] Write knulli.conf, es_settings.cfg and gamelists atomically
+
+saveSystemConf wrote knulli.conf.tmp and then copied it over knulli.conf,
+truncating it first; es_settings.cfg and gamelist.xml were rewritten in
+place by pugixml, and the per-game recovery files were deleted before
+being written again. A power cut or hard reboot at the wrong moment left
+an empty or partial file, and knulli.conf holds every system setting.
+
+Add Utils::FileSystem::writeFileAtomic: temporary file in the same folder
+(mkstemp), same mode and owner as the file it replaces, fsync, rename,
+then fsync of the folder; a symlink keeps pointing to the new file. Use
+it for knulli.conf, es_settings.cfg, gamelist.xml and the recovery files.
+
+knulli-settings-set also rewrites knulli.conf, under an flock on
+/var/run/knulli-settings-set.lock. On Knulli, saveSystemConf now holds
+the same lock from reading the file to replacing it (waiting at most
+2 s), so neither writer drops the other's change.
+---
+ es-app/src/Gamelist.cpp              | 17 ++++--
+ es-core/src/Settings.cpp             |  6 +-
+ es-core/src/SystemConf.cpp           | 60 ++++++++++++++----
+ es-core/src/utils/FileSystemUtil.cpp | 91 ++++++++++++++++++++++++++++
+ es-core/src/utils/FileSystemUtil.h   |  3 +
+ 5 files changed, 159 insertions(+), 18 deletions(-)
+
+diff --git a/es-app/src/Gamelist.cpp b/es-app/src/Gamelist.cpp
+index 918fe3f6..791c48ca 100644
+--- a/es-app/src/Gamelist.cpp
++++ b/es-app/src/Gamelist.cpp
+@@ -10,6 +10,7 @@
+ #include <pugixml/src/pugixml.hpp>
+ #include "Genres.h"
+ #include "Paths.h"
++#include <sstream>
+ 
+ #ifdef WIN32
+ #include <Windows.h>
+@@ -230,6 +231,15 @@ void parseGamelist(SystemData* system, std::unordered_map<std::string, FileData*
+ 		system->setGamelistHash(size);	
+ }
+ 
++// Gamelists are replaced, never truncated in place: a power cut while saving
++// leaves the previous file instead of an empty or partial one
++static bool saveGamelistFile(pugi::xml_document& doc, const std::string& path)
++{
++	std::ostringstream xml;
++	doc.save(xml);
++	return Utils::FileSystem::writeFileAtomic(path, xml.str());
++}
++
+ bool addFileDataNode(pugi::xml_node& parent, FileData* file, const char* tag, SystemData* system, bool fullPaths = false)
+ {
+ 	//create game and add to parent node
+@@ -282,8 +292,7 @@ bool saveToXml(FileData* file, const std::string& fileName, bool fullPaths)
+ 		if (!Utils::FileSystem::exists(folder))
+ 			Utils::FileSystem::createDirectory(folder);
+ 
+-		Utils::FileSystem::removeFile(fileName);
+-		if (!doc.save_file(WINSTRINGW(fileName).c_str()))
++		if (!saveGamelistFile(doc, fileName))
+ 		{
+ 			LOG(LogError) << "Error saving metadata to \"" << fileName << "\" (for system " << system->getName() << ")!";
+ 			return false;
+@@ -449,7 +458,7 @@ void updateGamelist(SystemData* system)
+ 
+ 		LOG(LogInfo) << "Added/Updated " << numUpdated << " entities in '" << xmlReadPath << "'";
+ 
+-		if (!doc.save_file(WINSTRINGW(xmlWritePath).c_str()))
++		if (!saveGamelistFile(doc, xmlWritePath))
+ 			LOG(LogError) << "Error saving gamelist.xml to \"" << xmlWritePath << "\" (for system " << system->getName() << ")!";
+ 		else
+ 			clearTemporaryGamelistRecovery(system);
+@@ -703,7 +712,7 @@ void cleanupGamelist(SystemData* system)
+ 		Utils::FileSystem::removeFile(oldXml);
+ 		Utils::FileSystem::copyFile(xmlWritePath, oldXml);
+ 
+-		if (!doc.save_file(WINSTRINGW(xmlWritePath).c_str()))
++		if (!saveGamelistFile(doc, xmlWritePath))
+ 			LOG(LogError) << "Error saving gamelist.xml to \"" << xmlWritePath << "\" (for system " << system->getName() << ")!";
+ 		else
+ 			clearTemporaryGamelistRecovery(system);
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index cb5d10f6..56930d51 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -6,6 +6,7 @@
+ #include "utils/Platform.h"
+ #include <pugixml/src/pugixml.hpp>
+ #include <algorithm>
++#include <sstream>
+ #include <vector>
+ #include "utils/StringUtil.h"
+ #include "Paths.h"
+@@ -451,7 +452,10 @@ bool Settings::saveFile()
+ 		node.append_attribute("value").set_value(iter->second.c_str());
+ 	}
+ 
+-	doc.save_file(WINSTRINGW(path).c_str());
++	std::ostringstream xml;
++	doc.save(xml);
++	if (!Utils::FileSystem::writeFileAtomic(path, xml.str()))
++		LOG(LogError) << "Settings::saveFile() : unable to save " << path;
+ 
+ 	Scripting::fireEvent("config-changed");
+ 	Scripting::fireEvent("settings-changed");
+diff --git a/es-core/src/SystemConf.cpp b/es-core/src/SystemConf.cpp
+index 64bb9cb2..67daa4d3 100644
+--- a/es-core/src/SystemConf.cpp
++++ b/es-core/src/SystemConf.cpp
+@@ -14,6 +14,41 @@
+ #include <iostream>
+ #include <SDL_timer.h>
+ 
++#if defined(KNULLI) && !defined(WIN32)
++#include <fcntl.h>
++#include <sys/file.h>
++#include <unistd.h>
++
++// knulli-settings-set rewrites knulli.conf while holding this lock. Holding it from
++// reading the file to replacing it keeps either writer from dropping the other's change.
++class ConfLock
++{
++public:
++	ConfLock() : mFd(open("/var/run/knulli-settings-set.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0644))
++	{
++		// Wait up to 2 s, then save anyway rather than lose the change
++		for (int i = 0; mFd >= 0 && i < 200; i++)
++		{
++			if (flock(mFd, LOCK_EX | LOCK_NB) == 0)
++				return;
++
++			usleep(10000);
++		}
++
++		LOG(LogWarning) << "saveSystemConf : knulli.conf lock not available, saving without it";
++	}
++
++	~ConfLock()
++	{
++		if (mFd >= 0)
++			close(mFd); // releases the lock
++	}
++
++private:
++	int mFd;
++};
++#endif
++
+ static std::string mapSettingsName(const std::string& name)
+ {
+ 	if (name == "system.language")
+@@ -108,6 +143,10 @@ bool SystemConf::saveSystemConf()
+ 	if (changedConf.empty())
+ 		return false;
+ 
++#if defined(KNULLI) && !defined(WIN32)
++	ConfLock lock;
++#endif
++
+ 	std::ifstream filein(mSystemConfFile); //File to read from
+ 
+ #ifndef WIN32
+@@ -185,25 +224,20 @@ bool SystemConf::saveSystemConf()
+ 
+ 	LOG(LogDebug) << "saveSystemConf :  " << lastTime;
+ 
+-	std::ofstream fileout(mSystemConfFileTmp); //Temporary file
+-	if (!fileout)
+-	{
+-		LOG(LogError) << "Unable to open for saving :  " << mSystemConfFileTmp << "\n";
+-		return false;
+-	}
++	std::string content;
+ 	for (int i = 0; i < fileLines.size(); i++) 
+ 	{
+ 		if (fileLines[i] != removeID)
+-			fileout << fileLines[i] << "\n";
++			content += fileLines[i] + "\n";
+ 	}
+ 
+-	fileout.close();
+-	
+-	std::ifstream  src(mSystemConfFileTmp, std::ios::binary);
+-	std::ofstream  dst(mSystemConfFile, std::ios::binary);
+-	dst << src.rdbuf();
++	// Never truncate knulli.conf in place: a power cut would leave it empty or partial
++	if (!Utils::FileSystem::writeFileAtomic(mSystemConfFile, content))
++	{
++		LOG(LogError) << "Unable to save :  " << mSystemConfFile << "\n";
++		return false;
++	}
+ 
+-	remove(mSystemConfFileTmp.c_str());
+ 	changedConf.clear();
+ 
+ 	Scripting::fireEvent("config-changed");
+diff --git a/es-core/src/utils/FileSystemUtil.cpp b/es-core/src/utils/FileSystemUtil.cpp
+index 868c1d43..8de6a10c 100644
+--- a/es-core/src/utils/FileSystemUtil.cpp
++++ b/es-core/src/utils/FileSystemUtil.cpp
+@@ -28,6 +28,10 @@
+ #include <dirent.h>
+ #include <unistd.h>
+ #include <mutex>
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <stdlib.h>
+ #endif // _WIN32
+ 
+ #include <fstream>
+@@ -1278,6 +1282,93 @@ namespace Utils
+ 			fclose(file);
+ 		}
+ 
++		bool writeFileAtomic(const std::string& fileName, const std::string& text)
++		{
++#if defined(_WIN32)
++			std::string tmp = fileName + ".tmp";
++			FILE* file = _wfopen(Utils::String::convertToWideString(tmp).c_str(), L"wb");
++			if (file == nullptr)
++				return false;
++
++			bool written = fwrite(text.data(), 1, text.size(), file) == text.size();
++			written = (fflush(file) == 0) && written;
++			fclose(file);
++
++			if (!written || !MoveFileExW(Utils::String::convertToWideString(tmp).c_str(), Utils::String::convertToWideString(fileName).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
++			{
++				_wremove(Utils::String::convertToWideString(tmp).c_str());
++				return false;
++			}
++
++			return true;
++#else
++			// Replace the file a symlink points to, not the symlink
++			std::string target = fileName;
++			char resolved[PATH_MAX];
++			if (realpath(fileName.c_str(), resolved) != nullptr)
++				target = resolved;
++
++			std::vector<char> tmp(target.begin(), target.end());
++			for (char c : std::string(".tmp.XXXXXX"))
++				tmp.push_back(c);
++			tmp.push_back(0);
++
++			int fd = mkstemp(tmp.data());
++			if (fd < 0)
++				return false;
++
++			// mkstemp creates 0600: keep the mode and owner of the file being replaced
++			struct stat info;
++			if (stat(target.c_str(), &info) == 0)
++			{
++				fchmod(fd, info.st_mode & 07777);
++
++				// Best effort: only root can give the file another owner
++				int owned = fchown(fd, info.st_uid, info.st_gid);
++				(void)owned;
++			}
++			else
++				fchmod(fd, 0644);
++
++			bool written = true;
++			const char* data = text.data();
++			size_t left = text.size();
++			while (left > 0)
++			{
++				ssize_t count = write(fd, data, left);
++				if (count < 0 && errno == EINTR)
++					continue;
++
++				if (count <= 0)
++				{
++					written = false;
++					break;
++				}
++
++				data += count;
++				left -= count;
++			}
++
++			written = (fsync(fd) == 0) && written;
++			written = (close(fd) == 0) && written;
++
++			if (!written || rename(tmp.data(), target.c_str()) != 0)
++			{
++				unlink(tmp.data());
++				return false;
++			}
++
++			int dir = open(getParent(target).c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++			if (dir >= 0)
++			{
++				fsync(dir);
++				close(dir);
++			}
++
++			return true;
++#endif
++		}
++
+ 		bool renameFile(const std::string src, const std::string dst, bool overWrite)
+ 		{
+ 			std::string path = getGenericPath(src);
+diff --git a/es-core/src/utils/FileSystemUtil.h b/es-core/src/utils/FileSystemUtil.h
+index 4bf4c1e1..7ef91dcc 100644
+--- a/es-core/src/utils/FileSystemUtil.h
++++ b/es-core/src/utils/FileSystemUtil.h
+@@ -67,6 +67,9 @@ namespace Utils
+ 		std::string	readAllText(const std::string& fileName);
+ 		stringList	readAllLines(const std::string& fileName);
+ 		void		writeAllText(const std::string& fileName, const std::string& text);
++		// Replaces fileName so that a crash or power cut leaves the old or the new content,
++		// never a partial file (temporary file in the same folder, fsync, rename, folder fsync)
++		bool		writeFileAtomic(const std::string& fileName, const std::string& text);
+ 		bool		copyFile(const std::string src, const std::string dst);
+ 		void		deleteDirectoryFiles(const std::string path, bool deleteDirectory = false);
+ 		bool		renameFile(const std::string src, const std::string dst, bool overWrite = true);

@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 02:21:33 +0000
+Subject: [PATCH] Keep tools, emulators and screenshots out of the last played
+ list
+
+- The "recent" collection took every entry with a play count: a tool, an
+  emulator or the screenshot viewer run last showed among the games, on its
+  card's counts and in its panel. It now holds games only, by the rule the
+  systems' counts already follow (SystemData::isUtilitySystem: tool,
+  emulator and system hardware, the image viewer, and their groups).
+- {global:lastPlayed} follows the same rule: it left out tools and the
+  screenshot viewer but not the emulators.
+---
+ es-app/src/CollectionSystemManager.cpp | 11 +++++++++--
+ es-app/src/CollectionSystemManager.h   |  1 +
+ es-app/src/SystemData.cpp              |  3 ++-
+ 3 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/es-app/src/CollectionSystemManager.cpp b/es-app/src/CollectionSystemManager.cpp
+index 0bed457f..15f31067 100644
+--- a/es-app/src/CollectionSystemManager.cpp
++++ b/es-app/src/CollectionSystemManager.cpp
+@@ -499,7 +499,7 @@ void CollectionSystemManager::updateCollectionSystem(FileData* file, const Colle
+ 	else
+ 	{
+ 		// we didn't find it here - we need to check if we should add it
+-		if (name == "recent" && file->getMetadata(MetaDataId::PlayCount) > "0" && includeFileInAutoCollections(file) ||
++		if (name == "recent" && isPlayedGame(file) && includeFileInAutoCollections(file) ||
+ 			name == "favorites" && file->getFavorite())
+ 		{
+ 			auto newGame = new CollectionFileData(file, curSys);
+@@ -1031,7 +1031,7 @@ void CollectionSystemManager::populateAutoCollection(CollectionSystemData* sysDa
+ 				include = game->hasCheevos();
+ 				break;
+ 			case AUTO_LAST_PLAYED:
+-				include = game->getMetadata(MetaDataId::PlayCount) > "0";
++				include = isPlayedGame(game);
+ 				break;
+ 			case AUTO_NEVER_PLAYED:
+ 				include = !(game->getMetadata(MetaDataId::PlayCount) > "0");
+@@ -1485,6 +1485,13 @@ bool CollectionSystemManager::themeFolderExists(std::string folder)
+ 	return std::find(mSystemsFromTheme.cbegin(), mSystemsFromTheme.cend(), folder) != mSystemsFromTheme.cend();
+ }
+ 
++// The last played list holds games only: what a tool, an emulator or the screenshot viewer ran is left out, by
++// the rule the systems' counts and {global:lastPlayed} follow (SystemData::isUtilitySystem)
++bool CollectionSystemManager::isPlayedGame(FileData* file)
++{
++	return file->getMetadata(MetaDataId::PlayCount) > "0" && !SystemData::isUtilitySystem(file->getSourceFileData()->getSystem());
++}
++
+ bool CollectionSystemManager::includeFileInAutoCollections(FileData* file)
+ {
+ 	// we exclude non-game files from collections (i.e. "kodi", entries from non-game systems)
+diff --git a/es-app/src/CollectionSystemManager.h b/es-app/src/CollectionSystemManager.h
+index 61237685..27b1f105 100644
+--- a/es-app/src/CollectionSystemManager.h
++++ b/es-app/src/CollectionSystemManager.h
+@@ -133,6 +133,7 @@ private:
+ 	bool themeFolderExists(std::string folder);
+ 
+ 	bool includeFileInAutoCollections(FileData* file);
++	static bool isPlayedGame(FileData* file);
+ 
+ 	void updateSystemsFromTheme();	
+ 	std::vector<std::string> mSystemsFromTheme;
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 4fd3f4bb..c27c4560 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -2496,7 +2496,8 @@ FileData* SystemData::getConsoleLastPlayedGame()
+ 
+ 	for (auto system : sSystemVector)
+ 	{
+-		if (system->isCollection() || !system->isGameSystem() || system->getName() == "tools" || system->getName() == "imageviewer")
++		// Games only, as the last played list and the systems' counts (tools, emulators, the screenshot viewer)
++		if (system->isCollection() || !system->isGameSystem() || isUtilitySystem(system))
+ 			continue;
+ 
+ 		FileData* game = system->getLastPlayedGame();

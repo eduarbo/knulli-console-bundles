@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:03:11 +0000
+Subject: [PATCH] Check kept frames against frames drawn directly
+
+- With RenderOnChangeVerify each frame the cache sends is read back, drawn
+  a second time without the cache and read back again: the two must have
+  the same pixels. A difference is logged as an error (the first 20); the
+  counts join the summary every 300 frames, now logged as a warning.
+---
+ es-app/src/main.cpp                       |  2 +-
+ es-core/src/renderers/Renderer.cpp        | 48 +++++++++++++++++++----
+ es-core/src/renderers/Renderer.h          |  7 +++-
+ es-core/src/renderers/Renderer_GLES20.cpp |  5 +++
+ es-core/src/renderers/Renderer_GLES20.h   |  1 +
+ 5 files changed, 52 insertions(+), 11 deletions(-)
+
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index e7f4b38b..76e21740 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -787,7 +787,7 @@ int main(int argc, char* argv[])
+ 		if (!onlyChanges)
+ 			Renderer::swapBuffers();
+ 		else
+-			drawn = Renderer::endFrame();
++			drawn = Renderer::endFrame([&window] { window.render(); });
+ 
+ 		int end = SDL_GetTicks();
+ 		Window::recordFrame(eventMs + end - workStart, drawn, { eventMs, renderStart - updateStart, showStart - renderStart, end - showStart });
+diff --git a/es-core/src/renderers/Renderer.cpp b/es-core/src/renderers/Renderer.cpp
+index 7dcc1551..a1a61992 100644
+--- a/es-core/src/renderers/Renderer.cpp
++++ b/es-core/src/renderers/Renderer.cpp
+@@ -1051,10 +1051,42 @@ namespace Renderer
+ 		}
+ 
+ 		// The check of the cache (Settings "RenderOnChangeVerify", for tests): every frame is drawn and read
+-		// back, and a frame the cache would have left out must have the pixels of the frame before it
++		// back, and a frame the cache would have left out must have the pixels of the frame before it. Each
++		// frame is also drawn a second time without the cache: what the kept commands drew must match it.
+ 		static bool                       verify = false;
+-		static std::vector<unsigned char> lastPixels, pixels;
++		static std::vector<unsigned char> lastPixels, pixels, keptPixels;
+ 		static int                        judgedSame = 0, differed = 0, drawnSame = 0, checked = 0;
++		static int                        compared = 0, keptDiffered = 0;
++
++		static size_t changedPixels(const std::vector<unsigned char>& a, const std::vector<unsigned char>& b)
++		{
++			size_t changed = 0;
++			for (size_t i = 0; i < a.size() && i < b.size(); i += 4)
++				if (memcmp(&a[i], &b[i], 4) != 0)
++					changed++;
++
++			return changed;
++		}
++
++		static void verifyKept(const std::function<void()>& drawAgain)
++		{
++			int w = getWindowWidth(), h = getWindowHeight();
++			keptPixels.resize((size_t)w * h * 4);
++			if (!Instance()->readPixels(0, 0, w, h, keptPixels.data()))
++				return;
++
++			Instance()->clear();
++			drawAgain();
++
++			pixels.resize(keptPixels.size());
++			if (!Instance()->readPixels(0, 0, w, h, pixels.data()))
++				return;
++
++			compared++;
++			size_t changed = changedPixels(keptPixels, pixels);
++			if (changed > 0 && ++keptDiffered <= 20)
++				LOG(LogError) << "RenderOnChangeVerify: the kept commands drew " << changed << " pixels unlike the frame drawn directly";
++		}
+ 
+ 		static void verifyFrame(bool same)
+ 		{
+@@ -1065,10 +1097,7 @@ namespace Renderer
+ 
+ 			if (lastPixels.size() == pixels.size())
+ 			{
+-				size_t changed = 0;
+-				for (size_t i = 0; i < pixels.size(); i += 4)
+-					if (memcmp(&pixels[i], &lastPixels[i], 4) != 0)
+-						changed++;
++				size_t changed = changedPixels(pixels, lastPixels);
+ 
+ 				if (same)
+ 					judgedSame++;
+@@ -1085,7 +1114,7 @@ namespace Renderer
+ 			std::swap(pixels, lastPixels);
+ 
+ 			if (++checked % 300 == 0)
+-				LOG(LogInfo) << "RenderOnChangeVerify: " << checked << " frames, " << judgedSame << " left out, " << differed << " of them changed; " << drawnSame << " drawn the same as the one before";
++				LOG(LogWarning) << "RenderOnChangeVerify: " << checked << " frames, " << judgedSame << " left out, " << differed << " of them changed; " << drawnSame << " drawn the same as the one before; " << compared << " compared with direct drawing, " << keptDiffered << " unlike it";
+ 		}
+ 	}
+ 
+@@ -1103,7 +1132,7 @@ namespace Renderer
+ 		verify = Settings::getInstance()->getBool("RenderOnChangeVerify");
+ 	}
+ 
+-	bool endFrame()
++	bool endFrame(const std::function<void()>& drawAgain)
+ 	{
+ 		using namespace FrameCache;
+ 
+@@ -1118,6 +1147,9 @@ namespace Renderer
+ 
+ 		send();
+ 
++		if (verify && drawAgain)
++			verifyKept(drawAgain);
++
+ 		if (verify)
+ 			verifyFrame(same);
+ 
+diff --git a/es-core/src/renderers/Renderer.h b/es-core/src/renderers/Renderer.h
+index 5bd7d162..92983f96 100644
+--- a/es-core/src/renderers/Renderer.h
++++ b/es-core/src/renderers/Renderer.h
+@@ -5,6 +5,7 @@
+ #include <vector>
+ #include <map>
+ #include <cstring>
++#include <functional>
+ #include "math/Vector2f.h"
+ #include "math/Vector3f.h"
+ 
+@@ -139,6 +140,7 @@ namespace Renderer
+ 
+ 		// What is drawn so far in the frame, as RGBA rows from the bottom; false when the renderer cannot
+ 		virtual bool		 readPixels(int _x, int _y, int _w, int _h, unsigned char* _rgba) { return false; };
++		virtual void		 clear() { };
+ 
+ 		virtual bool		 supportShaders() { return false; }
+ 		virtual bool		 shaderSupportsCornerSize(const std::string& shader) { return false; };
+@@ -205,9 +207,10 @@ namespace Renderer
+ 
+ 	// A frame drawn only when it changes: what is drawn between beginFrame and endFrame is kept, and
+ 	// endFrame draws and shows it only when it differs from the frame on screen (or a texture it uses
+-	// changed since); false when the screen keeps the frame it shows
++	// changed since); false when the screen keeps the frame it shows. With Settings "RenderOnChangeVerify"
++	// (tests), drawAgain draws the same frame once more without the cache, and the two must match.
+ 	void         beginFrame        ();
+-	bool         endFrame          ();
++	bool         endFrame          (const std::function<void()>& drawAgain = nullptr);
+ 	// The next frame is drawn whatever it holds (the screen may have lost the one it showed)
+ 	void         invalidateFrame   ();
+ 
+diff --git a/es-core/src/renderers/Renderer_GLES20.cpp b/es-core/src/renderers/Renderer_GLES20.cpp
+index 4be4e4ce..28873a90 100644
+--- a/es-core/src/renderers/Renderer_GLES20.cpp
++++ b/es-core/src/renderers/Renderer_GLES20.cpp
+@@ -1123,6 +1123,11 @@ namespace Renderer
+ 		return true;
+ 	}
+ 
++	void GLES20Renderer::clear()
++	{
++		GL_CHECK_ERROR(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
++	}
++
+ 	size_t GLES20Renderer::getTotalMemUsage()
+ 	{
+ 		size_t total = 0;
+diff --git a/es-core/src/renderers/Renderer_GLES20.h b/es-core/src/renderers/Renderer_GLES20.h
+index 5115c8be..d959c100 100644
+--- a/es-core/src/renderers/Renderer_GLES20.h
++++ b/es-core/src/renderers/Renderer_GLES20.h
+@@ -54,6 +54,7 @@ namespace Renderer
+ 
+ 		size_t		 getTotalMemUsage() override;
+ 		bool		 readPixels(int _x, int _y, int _w, int _h, unsigned char* _rgba) override;
++		void		 clear() override;
+ 
+ 		bool		 supportShaders() { return true; }
+ 		bool		 shaderSupportsCornerSize(const std::string& shader) override;

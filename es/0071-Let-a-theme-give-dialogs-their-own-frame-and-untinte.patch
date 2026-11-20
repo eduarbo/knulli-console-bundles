@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:26:32 +0000
+Subject: [PATCH] Let a theme give dialogs their own frame and untinted buttons
+
+A message box took the full-screen menu background, squeezed to its
+size, so it had no edge of its own. Its buttons were the menu button
+images tinted with the text and selector colours, at the label's
+height: a pill image as tall as its two corners left no middle row,
+and its stretch drew a line through the focused label.
+
+menuBackground gains dialogPath, the message boxes' background.
+menuButton gains color and filledColor, the tints of its two images
+(FFFFFFFF draws them as they are, so a focus ring keeps its colours),
+and height, the buttons' least height. Without them nothing changes.
+---
+ THEMES.md                                  | 13 +++++++++++--
+ es-core/src/ThemeData.cpp                  | 15 ++++++++++++++-
+ es-core/src/ThemeData.h                    |  8 ++++++--
+ es-core/src/components/ButtonComponent.cpp |  6 +++---
+ es-core/src/guis/GuiMsgBox.cpp             |  2 +-
+ 5 files changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 51f38418..46148c3f 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -824,14 +824,15 @@ ES versions with slides support the feature `slideshow`.
+ #### menu
+ * `helpsystem name="help"` - ALL
+ 	- The help system style for this view. If not defined, menus will have the same helpsystem as defined in system view.
+-* `menuBackground name="menubg"` - COLOR | PATH | FADEPATH
++* `menuBackground name="menubg"` - COLOR | PATH | FADEPATH | DIALOGPATH
+ 	- The background behind menus. you can set an image and/or change color (alpha supported)
++	- `dialogPath`: the background of message boxes, with the same corner size (default: `path`)
+ 	
+ * `menuSwitch name="menuswitch"` - PATHON | PATHOFF
+ 	- Images for the on/off switch in menus
+ * `menuSlider name="menuslider"` - PATH
+ 	- Image for the slider knob in menus
+-* `menuButton name="menubutton"` - PATH | FILLEDPATH
++* `menuButton name="menubutton"` - PATH | FILLEDPATH | CORNERSIZE | COLOR | FILLEDCOLOR | HEIGHT
+ 	- Images for menu buttons
+ * `menuTextEdit name="menutextedit"` - ACTIVE | INACTIVE | FONTPATH | FONTSIZE | CARETCOLOR
+ 	- The text field of the on-screen keyboard and other text popups
+@@ -1479,6 +1480,14 @@ BATOCERA 5.24 - replace the button images in menus
+   - Image path when the button is not selected
+ * `filledPath` - type: PATH. 
+   - Image path when the button is selected.
++* `cornerSize` - type: NORMALIZED_PAIR.
++  - The images' corner size, in pixels. Default is `16 16`.
++* `color` - type: COLOR.
++  - The tint of `path`. Default: the menu text's colour. `FFFFFFFF` draws the image as it is.
++* `filledColor` - type: COLOR.
++  - The tint of `filledPath`. Default: `menutext`'s `selectorColor`. `FFFFFFFF` draws the image as it is.
++* `height` - type: FLOAT.
++  - The buttons' least height, as a fraction of the screen height. Default: the label's height.
+ 
+ #### menuTextEdit
+ 
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index c7178d09..77223d42 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -658,6 +658,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 	{ "menuBackground", {
+ 		{ "path", PATH },
+ 		{ "fadePath", PATH },
++		{ "dialogPath", PATH },
+ 		{ "color", COLOR },
+ 		{ "centerColor", COLOR },
+ 		{ "cornerSize", NORMALIZED_PAIR },
+@@ -702,7 +703,10 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 	{ "menuButton",{
+ 		{ "cornerSize", NORMALIZED_PAIR },
+ 		{ "path", PATH },
+-		{ "filledPath", PATH } } },
++		{ "filledPath", PATH },
++		{ "color", COLOR },
++		{ "filledColor", COLOR },
++		{ "height", FLOAT } } },
+ };
+ 
+ std::shared_ptr<ThemeData::ThemeMenu> ThemeData::mMenuTheme;
+@@ -2351,6 +2355,9 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 		if (elem->has("fadePath") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("fadePath")))
+ 			Background.fadePath = elem->get<std::string>("fadePath");
+ 
++		if (elem->has("dialogPath") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("dialogPath")))
++			Background.dialogPath = elem->get<std::string>("dialogPath");
++
+ 		if (elem->has("color"))
+ 		{
+ 			Background.color = elem->get<unsigned int>("color");
+@@ -2494,6 +2501,12 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			Button.filledPath = elem->get<std::string>("filledPath");
+ 		if (elem->has("cornerSize"))
+ 			Button.cornerSize = elem->get<Vector2f>("cornerSize");
++		if (elem->has("color"))
++			Button.color = elem->get<unsigned int>("color");
++		if (elem->has("filledColor"))
++			Button.filledColor = elem->get<unsigned int>("filledColor");
++		if (elem->has("height"))
++			Button.height = elem->get<float>("height") * Renderer::getScreenHeight();
+ 	}
+ 
+ 	elem = theme->getElement("menu", "menutextedit", "menuTextEdit");
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index 07bafad5..fd150054 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -131,6 +131,7 @@ struct MenuBackground
+ 	std::string		path;
+ 	std::string		fadePath;	
+ 	Vector2f		cornerSize;	
++	std::string		dialogPath;		// message boxes; empty: path
+ 
+ 	unsigned int	scrollbarColor;
+ 	float			scrollbarSize;
+@@ -170,6 +171,9 @@ struct ButtonElement
+ 	std::string path;
+ 	std::string filledPath;
+ 	Vector2f	cornerSize;
++	unsigned int color;			// path's tint; 0: the menu text's colour
++	unsigned int filledColor;	// filledPath's tint; 0: the selector's colour
++	float		height;			// minimum height in pixels; 0: the label's
+ };
+ 
+ // The text field of the on-screen keyboard and of other text popups (menuTextEdit)
+@@ -204,14 +208,14 @@ public:
+ 	public:
+ 		ThemeMenu(ThemeData* theme);
+ 
+-		MenuBackground Background{ 0xFFFFFFFF, 0xFFFFFFFF, ":/frame.png", ":/scroll_gradient.png", Vector2f(16, 16), 0, 0.0025f, 0.01f, "innerright" };
++		MenuBackground Background{ 0xFFFFFFFF, 0xFFFFFFFF, ":/frame.png", ":/scroll_gradient.png", Vector2f(16, 16), "", 0, 0.0025f, 0.01f, "innerright" };
+ 		MenuElement Title{ 0x555555FF, 0x555555FF, 0x555555FF, 0xFFFFFFFF, 0x555555FF, true, "", nullptr };
+ 		MenuElement Text{ 0x777777FF, 0xFFFFFFFF, 0x878787FF, 0xC6C7C6FF, 0x878787FF, true, "", nullptr };
+ 		MenuElement TextSmall{ 0x777777FF, 0xFFFFFFFF, 0x878787FF, 0xC6C7C6FF, 0x878787FF, true, "", nullptr };
+ 		MenuElement Footer{ 0xC6C6C6FF, 0xC6C6C6FF, 0xC6C6C6FF, 0xFFFFFFFF, 0xC6C6C6FF, true, "", nullptr };
+ 		MenuGroupElement Group{ 0x777777FF, 0x00000010, 0xC6C7C6FF, 2.0, "", nullptr, 0 /*ALIGN_LEFT*/, false };
+ 		IconElement Icons { ":/on.svg", ":/off.svg", ":/auto.svg", ":/option_arrow.svg", ":/arrow.svg", ":/slider_knob.svg", ":/textinput_ninepatch.png", ":/textinput_ninepatch_active.png" };
+-		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16) };
++		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16), 0, 0, 0.0f };
+ 		TextEditElement TextEdit { nullptr, 0 };
+ 		KeyboardElement Keyboard { "", "", "", Vector2f(16, 16), 0.0f, 0xFFFFFFFF, 0xFFFFFFFF, nullptr, false, false };
+ 
+diff --git a/es-core/src/components/ButtonComponent.cpp b/es-core/src/components/ButtonComponent.cpp
+index 77183b52..58379c5a 100644
+--- a/es-core/src/components/ButtonComponent.cpp
++++ b/es-core/src/components/ButtonComponent.cpp
+@@ -20,8 +20,8 @@ ButtonComponent::ButtonComponent(Window* window, const std::string& text, const
+ 	mFont = menuTheme->Text.font;
+ 	mTextColorUnfocused = menuTheme->Text.color;
+ 	mTextColorFocused = menuTheme->Text.selectedColor;
+-	mColor = menuTheme->Text.color;
+-	mColorFocused = menuTheme->Text.selectorColor;
++	mColor = menuTheme->Button.color ? menuTheme->Button.color : menuTheme->Text.color;
++	mColorFocused = menuTheme->Button.filledColor ? menuTheme->Button.filledColor : menuTheme->Text.selectorColor;
+ 	mBox.setCornerSize(menuTheme->Button.cornerSize);
+ 	mRenderNonFocusedBackground = true;
+ 
+@@ -77,7 +77,7 @@ void ButtonComponent::setText(const std::string& text, const std::string& helpTe
+ 
+ 	float padding = TEXT_PADDING;
+ 	float minWidth = mFont->sizeText("DELETE").x() + padding;
+-	setSize(Math::max(mTextCache->metrics.size.x() + padding, minWidth), mTextCache->metrics.size.y());
++	setSize(Math::max(mTextCache->metrics.size.x() + padding, minWidth), Math::max(mTextCache->metrics.size.y(), ThemeData::getMenuTheme()->Button.height));
+ 
+ 	updateHelpPrompts();
+ }
+diff --git a/es-core/src/guis/GuiMsgBox.cpp b/es-core/src/guis/GuiMsgBox.cpp
+index 5f7b4a21..68f328e3 100644
+--- a/es-core/src/guis/GuiMsgBox.cpp
++++ b/es-core/src/guis/GuiMsgBox.cpp
+@@ -30,7 +30,7 @@ GuiMsgBox::GuiMsgBox(Window* window, const std::string& text,
+ 
+ 	TextToSpeech::getInstance()->say(text);
+ 
+-	mBackground.setImagePath(theme->Background.path);
++	mBackground.setImagePath(theme->Background.dialogPath.empty() ? theme->Background.path : theme->Background.dialogPath);
+ 	mBackground.setEdgeColor(theme->Background.color);
+ 	mBackground.setCenterColor(theme->Background.centerColor);
+ 	mBackground.setCornerSize(theme->Background.cornerSize);

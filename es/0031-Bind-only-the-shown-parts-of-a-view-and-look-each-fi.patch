@@ -1,0 +1,226 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:05:02 +0000
+Subject: [PATCH] Bind only the shown parts of a view and look each file and
+ game up once per binding
+
+- A hidden container's elements are not bound until it shows (its own
+  visibility is bound first), so a view can hold the layouts and parts of
+  other cases without binding them each time.
+- The system view's panel, the game list's details, a game list's first
+  load and the grid's population check files with the file system cache on,
+  and the panel's games ({system:continue}, {global:lastPlayed}) are looked
+  up once per binding pass (SystemData::FindPass).
+---
+ THEMES_BINDINGS.md                            |  4 ++
+ es-app/src/SystemData.cpp                     | 47 +++++++++++++++++--
+ es-app/src/SystemData.h                       | 10 ++++
+ es-app/src/views/SystemView.cpp               |  8 ++++
+ es-app/src/views/ViewController.cpp           |  3 ++
+ .../src/views/gamelist/GridGameListView.cpp   |  3 ++
+ es-core/src/BindingManager.cpp                |  6 +++
+ 7 files changed, 77 insertions(+), 4 deletions(-)
+
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index 63e91558..a03fd5e3 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -14,6 +14,10 @@ They can't be use in "if" attributes which requires static theme variables.
+ 
+ You can also use dynamic variables in the "enabled" attribute in the storyboards animation element ( <animation enabled="{global:cheevos}" [...] /> ).
+ 
++A hidden container's elements are not bound while it is hidden: its own visibility is bound first, and its
++elements when it shows. A view can hold the layouts and parts of other cases in containers without binding all
++of them each time (a video keeps its own visibility: one in a hidden container would still play).
++
+ The Binding engine supports standard operators evaluation ( +, -, *, /, &&, ||, ! ) and also simple evaluation methods.
+ 
+ Be careful : Dynamic variables  should not be confused with static variables. Static Variables use the $ sign ( ${variableName} ). Static variables are evaluated when the theme loads only.
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 6490371d..4fd3f4bb 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -2166,11 +2166,11 @@ FileData* SystemData::getLastPlayedGame(bool orChefPick)
+ 	if (info == nullptr || mRootFolder == nullptr)
+ 		return nullptr;
+ 
+-	FileData* game = info->lastPlayedPath.empty() ? nullptr : mRootFolder->FindByPath(info->lastPlayedPath);
++	FileData* game = info->lastPlayedPath.empty() ? nullptr : findByPath(info->lastPlayedPath);
+ 	if (game == nullptr && orChefPick && mPanelVideo)
+ 		game = getSuggestedGame();
+ 	if (game == nullptr && orChefPick && !info->chefPickPath.empty())
+-		game = mRootFolder->FindByPath(info->chefPickPath);
++		game = findByPath(info->chefPickPath);
+ 
+ 	return game;
+ }
+@@ -2364,7 +2364,7 @@ FileData* SystemData::getSuggestedGame()
+ 	if (!mSuggestionsReady || mSuggestions.empty())
+ 		return nullptr;
+ 
+-	return mRootFolder->FindByPath(mSuggestions.current());
++	return findByPath(mSuggestions.current());
+ }
+ 
+ FileData* SystemData::getRecentItem(size_t index)
+@@ -2408,7 +2408,7 @@ FileData* SystemData::getRecentItem(size_t index)
+ 	if (index >= mRecent.size())
+ 		return nullptr;
+ 
+-	return mRootFolder->FindByPath(mRecent[index]);
++	return findByPath(mRecent[index]);
+ }
+ 
+ bool SystemData::hasOtherSuggestion()
+@@ -2450,6 +2450,45 @@ bool SystemData::isUtilitySystem(SystemData* system)
+ 	return false;
+ }
+ 
++static int sFindPasses = 0;
++static std::vector<SystemData*> sFoundIn;
++
++SystemData::FindPass::FindPass()
++{
++	sFindPasses++;
++}
++
++SystemData::FindPass::~FindPass()
++{
++	if (--sFindPasses > 0)
++		return;
++
++	for (auto system : sFoundIn)
++		system->mFound.clear();
++
++	sFoundIn.clear();
++}
++
++FileData* SystemData::findByPath(const std::string& path)
++{
++	if (mRootFolder == nullptr)
++		return nullptr;
++
++	if (sFindPasses == 0)
++		return mRootFolder->FindByPath(path);
++
++	auto it = mFound.find(path);
++	if (it != mFound.cend())
++		return it->second;
++
++	if (mFound.empty())
++		sFoundIn.push_back(this);
++
++	FileData* found = mRootFolder->FindByPath(path);
++	mFound[path] = found;
++	return found;
++}
++
+ FileData* SystemData::getConsoleLastPlayedGame()
+ {
+ 	FileData* last = nullptr;
+diff --git a/es-app/src/SystemData.h b/es-app/src/SystemData.h
+index 9b0775ae..936ea31d 100644
+--- a/es-app/src/SystemData.h
++++ b/es-app/src/SystemData.h
+@@ -122,6 +122,15 @@ public:
+ 	// The game played last on the console (tools and screenshots left out)
+ 	static FileData* getConsoleLastPlayedGame();
+ 
++	// A game by its path. While a FindPass lives (a view binding its elements: a panel asks for
++	// {system:continue:...} and {global:lastPlayed:...} dozens of times), each one is searched for once
++	FileData* findByPath(const std::string& path);
++	class FindPass
++	{
++	public:
++		FindPass();
++		~FindPass();
++	};
+ 
+ 	// The tabbed home. The captures the system's card slides through ({system:slides}): its favorites
+ 	// with one, else its best-rated games, as the theme variable "systemslides" orders and filters them
+@@ -325,6 +334,7 @@ private:
+ 	bool mHomeDirty;		// to be made (again)
+ 	int mHomeGeneration;	// counts the changes, so a list made before the last one is made once more
+ 	std::shared_ptr<HomeJob> mHomeJob;
++	std::unordered_map<std::string, FileData*> mFound;	// FindPass
+ 	std::vector<std::string> mRecent;
+ 	size_t mRecentCount;	// the files it was made from
+ 	bool mPanelVideo;
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index 7e224cbb..4cc6ac7c 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -331,6 +331,9 @@ void SystemView::populate(bool keepExtras)
+ {
+ 	TextureLoader::paused = true;
+ 
++	// The systems' elements check the same files: once each
++	Utils::FileSystem::FileSystemCacheActivator fsc;
++
+ 	clearEntries(keepExtras && !mViewNeedsReload);
+ 
+ 	// The view's elements come from the first system with a theme
+@@ -892,6 +895,11 @@ void SystemView::updateExtraTextBinding()
+ 	if (system == nullptr)
+ 		return;
+ 
++	// The extras check the same files again and again (firstfile(), each image's path) and look for the same
++	// games ({system:continue:...}, {global:lastPlayed:...}): once is enough
++	Utils::FileSystem::FileSystemCacheActivator fsc;
++	SystemData::FindPass findPass;
++
+ 	for (auto extra : mEntries[mCursor].backgroundExtras)
+ 		BindingManager::updateBindings(extra, system);
+ 
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index cf75cc63..a5904d62 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -681,6 +681,9 @@ std::shared_ptr<IGameListView> ViewController::getGameListView(SystemData* syste
+ 		if (!loadIfnull)
+ 			return nullptr;
+ 
++		// The view's elements and its games' media check the same files again and again: once each
++		Utils::FileSystem::FileSystemCacheActivator fsc;
++
+ 		system->setUIModeFilters();
+ 		system->updateDisplayedGameCount();
+ 	}
+diff --git a/es-app/src/views/gamelist/GridGameListView.cpp b/es-app/src/views/gamelist/GridGameListView.cpp
+index 456004f9..8505b3f9 100644
+--- a/es-app/src/views/gamelist/GridGameListView.cpp
++++ b/es-app/src/views/gamelist/GridGameListView.cpp
+@@ -225,6 +225,9 @@ void GridGameListView::updateInfoPanel()
+ 	if (mRoot->getSystem()->isCollection())
+ 		updateHelpPrompts();
+ 
++	// The details check the same files again and again (firstfile(), each image's path): once is enough
++	Utils::FileSystem::FileSystemCacheActivator fsc;
++
+ 	updateThemeExtrasBindings();
+ 
+ 	FileData* file = (mGrid.size() == 0 || mGrid.isScrolling()) ? NULL : mGrid.getSelected();
+diff --git a/es-core/src/BindingManager.cpp b/es-core/src/BindingManager.cpp
+index abe0612d..3e5f9043 100644
+--- a/es-core/src/BindingManager.cpp
++++ b/es-core/src/BindingManager.cpp
+@@ -3,6 +3,7 @@
+ #include "LocaleES.h"
+ #include <time.h>
+ #include <map>
++#include <typeinfo>
+ 
+ #include "components/TextComponent.h"
+ #include "components/ImageComponent.h"
+@@ -339,6 +340,11 @@ void BindingManager::updateBindings(GuiComponent* comp, IBindable* bindable, boo
+ 
+ 	if (recursive)
+ 	{
++		// A hidden container's elements are bound when it shows (its own visibility is bound first, above): a
++		// view can hold the layouts and parts of other cases without binding all of them each time
++		if (!comp->isVisible() && typeid(*comp) == typeid(GuiComponent))
++			return;
++
+ 		for (int i = 0; i < comp->getChildCount(); i++)
+ 			updateBindings(comp->getChild(i), bindable, recursive);
+ 

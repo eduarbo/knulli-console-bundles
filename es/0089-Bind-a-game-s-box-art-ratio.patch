@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 14:39:29 +0000
+Subject: [PATCH] Bind a game's box art ratio
+
+A theme can lay a game's details out around its capture's shape
+(imageRatio); thumbnailRatio gives the same for its thumbnail, the box
+art: portrait for most boxes, landscape for some, square for a CD case.
+---
+ THEMES_BINDINGS.md      | 1 +
+ es-app/src/FileData.cpp | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index 0a137990..9a34942b 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -142,6 +142,7 @@ nameExtra                   string                name, after any parenthesis
+ cleanName                   string                name without the trailing tags of dump sets: (USA), (En,Fr), (Rev 1), (v1.1), (Beta), [!]...; " : " as ": "; a screenshot named game-YYMMDD-HHMMSS: its game ("batsugun-241022-000406": "Batsugun")
+ shotDate                    string                a screenshot named game-YYMMDD-HHMMSS: when it was taken ("22/10/2024 · 00:04"); empty for any other
+ imageRatio                  float                 the image's width over its height (4:3 is 1.33, a DS's two screens 0.67); 0 without an image
++thumbnailRatio              float                 the same for the thumbnail (the box art): 0.71 for most boxes, about 1 for a CD case; 0 without one
+ ```
+ 
+ **global:**
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index 45f785a5..ac5148c8 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -60,6 +60,7 @@ static std::map<std::string, std::function<BindableProperty(FileData*)>> propert
+ 	{ "hasKeyboardMapping", [](FileData* file) { return file->hasKeyboardMapping(); } },	
+ 	{ "systemName",			[](FileData* file) { return file->getSourceFileData()->getSystem()->getFullName(); } },
+ 	{ "imageRatio",			[](FileData* file) { return FileData::getImageRatio(file->getImagePath()); } },
++	{ "thumbnailRatio",		[](FileData* file) { return FileData::getImageRatio(file->getThumbnailPath(false)); } },
+ };
+ 
+ // An image's width over its height (0 without one), read from its header once per file and size

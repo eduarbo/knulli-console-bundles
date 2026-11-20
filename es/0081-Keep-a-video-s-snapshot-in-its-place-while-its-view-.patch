@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:11:25 +0000
+Subject: [PATCH] Keep a video's snapshot in its place while its view slides
+
+A view is hidden when a slide away from it starts, but it is still
+drawn until the slide ends; so is the view coming in before it is
+shown. Its videos stop when it is hidden, and a stopped video drew
+nothing: the capture's place was a hole for the whole slide. Out of
+view, a video that is not playing now draws its snapshot.
+---
+ es-core/src/components/VideoComponent.cpp    | 15 +++++++++++++++
+ es-core/src/components/VideoVlcComponent.cpp |  9 ++++++++-
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index a31203f4..b7bbc96c 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -253,6 +253,21 @@ bool VideoComponent::isUnplayable(const std::string& path)
+ 
+ void VideoComponent::renderSnapshot(const Transform4x4f& parentTrans)
+ {
++	// Out of view (a view still drawn while it slides away, or before it is shown), the stopped video leaves its
++	// snapshot in its place instead of a hole
++	if (!isShowing() && !mIsPlaying && !mIsWaitingForVideoToStart && !isPaused() && (mConfig.showSnapshotNoVideo || mConfig.showSnapshotDelay))
++	{
++		if (!mStaticImage.isStoryBoardRunning("snapshot"))
++		{
++			mStaticImage.setOpacity(getOpacity());
++			if (!currentStoryBoardHasProperty("scale"))
++				mStaticImage.setScale(getScale());
++		}
++
++		mStaticImage.render(parentTrans);
++		return;
++	}
++
+ 	// This is the case where the video is not currently being displayed. Work out
+ 	// if we need to display a static image
+ 	if ((mConfig.showSnapshotNoVideo && (mVideoPath.empty() || isUnplayable(mVideoPath) || mIdleStopped)) || ((mStartDelayed || mFadeIn < 1.0 || mIdleStopped) && mConfig.showSnapshotDelay))
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 85750c3e..cc66de01 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -656,9 +656,16 @@ void VideoVlcComponent::updateRoundCorners()
+ 
+ void VideoVlcComponent::render(const Transform4x4f& parentTrans)
+ {
+-	if (!isShowing() || !isVisible())
++	if (!isVisible())
+ 		return;
+ 
++	// Out of view but drawn (a view sliding away or in): its snapshot, not the stopped player
++	if (!isShowing())
++	{
++		VideoComponent::render(parentTrans);
++		return;
++	}
++
+ 	VideoComponent::render(parentTrans);
+ 
+ 	bool initFromPixels = true;

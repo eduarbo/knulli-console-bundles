@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 17:11:44 +0000
+Subject: [PATCH] Continue the console's last game with X at the tabs
+
+On a column home, the tabs (level 1) show no system's column: X there
+continues the game played last on the console, the one the status line
+names, instead of the selected card's. At the cards (level 2) it still
+continues the card's game, as its column says.
+---
+ es-app/src/views/SystemView.cpp | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index bf40428c..d2d8226b 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -753,7 +753,20 @@ bool SystemView::input(InputConfig* config, Input input)
+ 	if (input.value != 0)
+ 	{
+ 		// Tabs: X continues the selected system's last game, else plays the game the panel suggests;
+-		// nothing on tools, emulators and screenshots (it never runs a tool again unasked)
++		// nothing on tools, emulators and screenshots (it never runs a tool again unasked). In columns, at the
++		// tabs (level 1, no system's column shown) it continues the console's last game, the status line's
++		if (hasTabs() && config->isMappedTo("x", input) && hasColumns() && mColumnLevel == 1)
++		{
++			FileData* game = SystemData::getConsoleLastPlayedGame();
++			if (game != nullptr)
++			{
++				mCarousel.stopScrolling();
++				ViewController::get()->launch(game);
++			}
++
++			return true;
++		}
++
+ 		if (hasTabs() && config->isMappedTo("x", input))
+ 		{
+ 			SystemData* system = getSelected();
+@@ -1427,7 +1440,7 @@ std::vector<HelpPrompt> SystemView::getHelpPrompts()
+ 	if (hasTabs())
+ 	{
+ 		SystemData* system = getSelected();
+-		if (system != nullptr && system->getContinueGame() != nullptr)
++		if (hasColumns() && mColumnLevel == 1 ? SystemData::getConsoleLastPlayedGame() != nullptr : system != nullptr && system->getContinueGame() != nullptr)
+ 			prompts.push_back(HelpPrompt("x", _("CONTINUE")));
+ 
+ 		if (SystemData::getSystem("all") != nullptr)

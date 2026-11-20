@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 15:51:45 +0000
+Subject: [PATCH] Bring a video in over its snapshot once its picture is lit
+
+Most videos open on a fade from black, picture and sound. A video that
+replaces its snapshot in place (no effect, after a delay) came in over
+that black: the capture dimmed to black and the video rose from it.
+
+It now waits until its frames are lit and no longer brightening, at
+most three seconds from its first frame, its sound held back until it
+shows. The snapshot stays whole under it while it comes in, so the two
+crossfade instead of dipping to the background.
+---
+ es-core/src/components/VideoComponent.cpp    |  4 ++
+ es-core/src/components/VideoComponent.h      |  3 +
+ es-core/src/components/VideoLight.h          | 54 +++++++++++++++++
+ es-core/src/components/VideoVlcComponent.cpp | 63 +++++++++++++++++++-
+ es-core/src/components/VideoVlcComponent.h   | 11 ++++
+ 5 files changed, 133 insertions(+), 2 deletions(-)
+ create mode 100644 es-core/src/components/VideoLight.h
+
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 85408113..953ce316 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -277,6 +277,10 @@ void VideoComponent::renderSnapshot(const Transform4x4f& parentTrans)
+ 		t -= 1; // cubic ease out
+ 		t = Math::lerp(0, 1, t*t*t + 1);
+ 
++		// a crossfade: the video comes in over the whole snapshot, which goes only once the video is in
++		if (mIsPlaying && coversSnapshot())
++			t = 1.0f;
++
+ 		if (hasStoryBoard())
+ 			t = (t * 255.0f);
+ 		else
+diff --git a/es-core/src/components/VideoComponent.h b/es-core/src/components/VideoComponent.h
+index 9bf4f6d8..6c7f46be 100644
+--- a/es-core/src/components/VideoComponent.h
++++ b/es-core/src/components/VideoComponent.h
+@@ -116,6 +116,9 @@ public:
+ 	}
+ 
+ 	virtual void onVideoStarted();
++	// Whether the video comes in over its snapshot in place, the snapshot whole under it until it is in (a
++	// crossfade); otherwise the snapshot fades out as the video comes in
++	virtual bool coversSnapshot() { return false; }
+ 
+ 	const MaxSizeInfo getMaxSizeInfo()
+ 	{
+diff --git a/es-core/src/components/VideoLight.h b/es-core/src/components/VideoLight.h
+new file mode 100644
+index 00000000..1548b548
+--- /dev/null
++++ b/es-core/src/components/VideoLight.h
+@@ -0,0 +1,54 @@
++#pragma once
++#ifndef ES_CORE_COMPONENTS_VIDEO_LIGHT_H
++#define ES_CORE_COMPONENTS_VIDEO_LIGHT_H
++
++// When a video that replaces its snapshot may show. Most videos open on a fade from black (picture and sound), and a
++// crossfade into that dips the picture to black: the snapshot stays until the video's frames are lit and the fade is
++// over (a frame no brighter than the one before), or until VIDEO_LIGHT_WAIT_MS after the first frame.
++namespace VideoLight
++{
++	// A frame this dark (0-255) is still the fade from black
++	static const int VIDEO_LIT = 10;
++	// The longest the snapshot waits for the video's light, from its first frame
++	static const unsigned int VIDEO_LIGHT_WAIT_MS = 3000;
++
++	// The average light (luma, 0-255) of an RGBA frame of width x height (rows of width * 4 bytes), from a grid of
++	// 16 x 16 points
++	inline int frameLight(const unsigned char* pixels, int width, int height)
++	{
++		if (pixels == nullptr || width <= 0 || height <= 0)
++			return 0;
++
++		long sum = 0;
++		int count = 0;
++		for (int j = 0; j < 16; j++)
++		{
++			int y = (2 * j + 1) * height / 32;
++			for (int i = 0; i < 16; i++)
++			{
++				int x = (2 * i + 1) * width / 32;
++				const unsigned char* p = pixels + ((long)y * width + x) * 4;
++				sum += (p[0] * 54 + p[1] * 183 + p[2] * 19) >> 8;
++				count++;
++			}
++		}
++
++		return (int)(sum / count);
++	}
++
++	// Whether the video may show, given its newest frame's light, the one before (-1: none yet) and the time since
++	// its first frame. A first frame lit already may be in the middle of the fade: the next one tells.
++	inline bool mayShow(int light, int lastLight, unsigned int sinceFirstMs)
++	{
++		if (sinceFirstMs >= VIDEO_LIGHT_WAIT_MS)
++			return true;
++
++		if (light < VIDEO_LIT || lastLight < 0)
++			return false;
++
++		// still coming in from black: brighter than the frame before
++		return light <= lastLight + 1;
++	}
++}
++
++#endif // ES_CORE_COMPONENTS_VIDEO_LIGHT_H
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 1aa276a7..2498f683 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -1,6 +1,7 @@
+ #include "components/VideoVlcComponent.h"
+ #include "components/ImageAspectCheck.h"
+ #include "components/ScreenShape.h"
++#include "components/VideoLight.h"
+ 
+ #include "renderers/Renderer.h"
+ #include "resources/TextureResource.h"
+@@ -438,6 +439,7 @@ void VideoVlcComponent::onVideoStarted()
+ 	VideoComponent::onVideoStarted();
+ 	resize();
+ 	videoShown(this, true);
++	releaseHeldAudio();
+ }
+ 
+ void VideoVlcComponent::crop(float left, float top, float right, float bot)
+@@ -1013,22 +1015,67 @@ bool VideoVlcComponent::uploadFrame()
+ 
+ 	mTexture->updateFromExternalPixels(mContext->surfaces[frame], mVideoWidth, mVideoHeight);
+ 	mContext->hasFrame[frame] = false;
++
++	// While the video waits to show (checkDisplayed): how lit this frame is
++	if (mIsWaitingForVideoToStart)
++	{
++		mContext->lastLight = mContext->light;
++		mContext->light = VideoLight::frameLight(mContext->surfaces[frame], mVideoWidth, mVideoHeight);
++	}
++
+ 	return true;
+ }
+ 
+ // The first frame VLC displayed: the video shows from now on, once that frame is whole in the texture (until
+-// then the snapshot, or what is under the video, stays)
++// then the snapshot, or what is under the video, stays). A video that comes in over its snapshot waits for its
++// picture to be lit (VideoLight), its sound with it.
+ void VideoVlcComponent::checkDisplayed()
+ {
+ 	if (mContext == nullptr || !mContext->valid || !mContext->displayed || mIsPlaying || !mIsWaitingForVideoToStart)
+ 		return;
+ 
+-	if (!uploadFrame() && (mTexture == nullptr || !mTexture->isLoaded()))
++	bool fresh = uploadFrame();
++	if (!fresh && (mTexture == nullptr || !mTexture->isLoaded()))
+ 		return;
+ 
++	if (mAudioHeld || waitsForLight())
++	{
++		// its player taken first: the sound held back is let go when the video shows
++		if (mMediaPlayer == nullptr)
++			return;
++
++		Uint32 now = SDL_GetTicks();
++		if (!mContext->firstShown)
++		{
++			mContext->firstShown = true;
++			mContext->firstShownTicks = now;
++		}
++
++		unsigned int since = now - mContext->firstShownTicks;
++		if (since < VideoLight::VIDEO_LIGHT_WAIT_MS && (!fresh || !VideoLight::mayShow(mContext->light, mContext->lastLight, since)))
++			return;
++	}
++
+ 	onVideoStarted();
+ }
+ 
++// A video that replaces its snapshot in place (no effect) after a delay waits for its picture's light
++bool VideoVlcComponent::waitsForLight()
++{
++	return mEffect == VideoVlcFlags::VideoVlcEffect::NONE && mConfig.startDelay > 0 && !mScreensaverMode && PowerSaver::getMode() != PowerSaver::INSTANT;
++}
++
++// The sound held back while the video waited for its light plays from now on
++void VideoVlcComponent::releaseHeldAudio()
++{
++	if (!mAudioHeld)
++		return;
++
++	mAudioHeld = false;
++	if (mMediaPlayer != nullptr)
++		libvlc_audio_set_mute(mMediaPlayer, 0);
++}
++
+ void VideoVlcComponent::handleLooping()
+ {
+ 	checkParse();
+@@ -1319,12 +1366,22 @@ void VideoVlcComponent::startPlayback(const Probe& probe)
+ 		start->width = mVideoWidth;
+ 		start->height = mVideoHeight;
+ 
++		mAudioHeld = false;
+ 		if (hasAudioTrack)
+ 		{
+ 			if (!getPlayAudio() || (!mScreensaverMode && !Settings::getInstance()->getBool("VideoAudio")) || (Settings::getInstance()->getBool("ScreenSaverVideoMute") && mScreensaverMode))
+ 				start->mute = true;
+ 			else
++			{
+ 				AudioManager::setVideoPlaying(true);
++
++				// its sound starts with its picture (checkDisplayed)
++				if (waitsForLight())
++				{
++					start->mute = true;
++					mAudioHeld = true;
++				}
++			}
+ 		}
+ 
+ 		mStart = start;
+@@ -1353,6 +1410,7 @@ void VideoVlcComponent::stopVideo()
+ 	mIsPlaying = false;
+ 	mIsWaitingForVideoToStart = false;
+ 	mStartDelayed = false;
++	mAudioHeld = false;
+ 
+ 	releasePlayback();
+ 	PowerSaver::resume();
+@@ -1563,6 +1621,7 @@ void VideoVlcComponent::resumeVideo()
+ 
+ 	mIsPlaying = true;
+ 	libvlc_media_player_play(mMediaPlayer);
++	releaseHeldAudio();
+ 	PowerSaver::pause();
+ 	AudioManager::setVideoPlaying(true);
+ }
+diff --git a/es-core/src/components/VideoVlcComponent.h b/es-core/src/components/VideoVlcComponent.h
+index 8f24d189..5dd0120d 100644
+--- a/es-core/src/components/VideoVlcComponent.h
++++ b/es-core/src/components/VideoVlcComponent.h
+@@ -43,6 +43,12 @@ struct VideoContext
+ 	unsigned int		width, height;	// of the buffers
+ 	// Set by VLC's display callback; the UI thread starts showing the video (VideoVlcComponent::checkDisplayed)
+ 	std::atomic<bool>	displayed;
++
++	// UI thread only, while the video waits to show: the light of its newest frames (VideoLight) and when the
++	// first one came
++	int					light = -1, lastLight = -1;
++	bool				firstShown = false;
++	unsigned int		firstShownTicks = 0;
+ };
+ 
+ struct PlayerStart;
+@@ -156,6 +162,10 @@ private:
+ 	void checkStart();
+ 	void checkDisplayed();
+ 	bool uploadFrame();
++	bool waitsForLight();
++	void releaseHeldAudio();
++	// With no effect the video comes in over its snapshot in place: the snapshot stays whole under it
++	bool coversSnapshot() override { return mEffect == VideoVlcFlags::VideoVlcEffect::NONE; }
+ 	static bool findProbe(const std::string& path, Probe& probe);
+ 	static void keepProbe(const std::string& path, const Probe& probe);
+ 
+@@ -176,6 +186,7 @@ private:
+ 	Renderer::ShaderInfo			mCustomShader;
+ 
+ 	VideoVlcFlags::VideoVlcEffect	mEffect;
++	bool							mAudioHeld = false;	// its sound muted until its picture shows
+ 
+ 	unsigned int					mColorShift;
+ 	int								mElapsed;

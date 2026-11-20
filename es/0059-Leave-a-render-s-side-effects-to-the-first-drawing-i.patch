@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 03:24:03 +0000
+Subject: [PATCH] Leave a render's side effects to the first drawing in verify
+ mode
+
+- RenderOnChangeVerify draws each frame a second time; that drawing also
+  ran the videos' delayed start and loop handling and the screen saver's
+  start, so the two drawings could differ for reasons other than the
+  cache. The second drawing now only draws.
+---
+ es-core/src/Window.cpp                    | 2 +-
+ es-core/src/components/VideoComponent.cpp | 4 ++++
+ es-core/src/renderers/Renderer.cpp        | 9 +++++++++
+ es-core/src/renderers/Renderer.h          | 3 +++
+ 4 files changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index 804c7bc2..db7ebe16 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -785,7 +785,7 @@ void Window::render()
+ 	Renderer::setMatrix(transform);
+ 
+ 	unsigned int screensaverTime = (unsigned int)Settings::ScreenSaverTime();
+-	if (mTimeSinceLastInput >= screensaverTime && screensaverTime != 0)
++	if (mTimeSinceLastInput >= screensaverTime && screensaverTime != 0 && !Renderer::isDrawingAgain())
+ 		startScreenSaver();
+ 
+ 	// Render notifications
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 4e177fe8..86491800 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -206,6 +206,10 @@ void VideoComponent::render(const Transform4x4f& parentTrans)
+ 		Renderer::drawRect(0.0f, 0.0f, mSize.x(), mSize.y(), 0x00000033);
+ 	}
+ 
++	// The frame drawn a second time for RenderOnChangeVerify does not start or loop the video again
++	if (Renderer::isDrawingAgain())
++		return;
++
+ 	// Handle the case where the video is delayed
+ 	if (!GuiComponent::isLaunchTransitionRunning)
+ 		handleStartDelay();
+diff --git a/es-core/src/renderers/Renderer.cpp b/es-core/src/renderers/Renderer.cpp
+index c16c41b6..035e023e 100644
+--- a/es-core/src/renderers/Renderer.cpp
++++ b/es-core/src/renderers/Renderer.cpp
+@@ -1092,6 +1092,8 @@ namespace Renderer
+ 			return changed;
+ 		}
+ 
++		static bool drawingAgain = false;
++
+ 		static void verifyKept(const std::function<void()>& drawAgain)
+ 		{
+ 			int w = getWindowWidth(), h = getWindowHeight();
+@@ -1100,7 +1102,9 @@ namespace Renderer
+ 				return;
+ 
+ 			Instance()->clear();
++			drawingAgain = true;
+ 			drawAgain();
++			drawingAgain = false;
+ 
+ 			pixels.resize(keptPixels.size());
+ 			if (!Instance()->readPixels(0, 0, w, h, pixels.data()))
+@@ -1206,6 +1210,11 @@ namespace Renderer
+ 		FrameCache::shownValid = false;
+ 	}
+ 
++	bool isDrawingAgain()
++	{
++		return FrameCache::drawingAgain;
++	}
++
+ 	//////////////////////////////////////////////////////////////////////////
+ 	std::string getDriverName()
+ 	{
+diff --git a/es-core/src/renderers/Renderer.h b/es-core/src/renderers/Renderer.h
+index 92983f96..13bf2dee 100644
+--- a/es-core/src/renderers/Renderer.h
++++ b/es-core/src/renderers/Renderer.h
+@@ -213,6 +213,9 @@ namespace Renderer
+ 	bool         endFrame          (const std::function<void()>& drawAgain = nullptr);
+ 	// The next frame is drawn whatever it holds (the screen may have lost the one it showed)
+ 	void         invalidateFrame   ();
++	// RenderOnChangeVerify's second drawing of a frame: what a render does besides drawing (a video's start
++	// and loop, the screen saver's start) is left to the first
++	bool         isDrawingAgain    ();
+ 
+ 	void		 blurBehind		   (const float _x, const float _y, const float _w, const float _h, const float blurSize = 4.0f);
+ 	void		 postProcessShader (const std::string& path, const float _x, const float _y, const float _w, const float _h, const std::map<std::string, std::string>& parameters, unsigned int* data = nullptr);

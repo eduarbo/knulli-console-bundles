@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 03:22:15 +0000
+Subject: [PATCH] Count as utilities only the tools, emulators and screenshot
+ viewer
+
+- The utility rule took any system with the hardware type "system", and a
+  group made from its systems alone (one with no entry of its own) gets
+  that type: its games would have left the last played list and the
+  game counts. The rule now goes by the utilities' names, an explicit
+  tool or emulator hardware type, or the image viewer's platform.
+---
+ es-app/src/SystemData.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index c27c4560..6c230981 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -2430,7 +2430,9 @@ FileData* SystemData::getContinueGame()
+ }
+ 
+ // Tools, emulators and the screenshot viewer (a group's systems count as their group's): what they ran
+-// is shown, but X does not run it again.
++// is shown, but X does not run it again, and the last played list and the game counts leave them out. By
++// name, by an explicit tool or emulator hardware type, or the image viewer's platform; a group made from
++// its systems alone gets the hardware type "system" and is no utility.
+ bool SystemData::isUtilitySystem(SystemData* system)
+ {
+ 	if (system == nullptr)
+@@ -2442,7 +2444,7 @@ bool SystemData::isUtilitySystem(SystemData* system)
+ 			continue;
+ 
+ 		const std::string& hardware = s->getSystemMetadata().hardwareType;
+-		if (hardware == "tool" || hardware == "emulator" || hardware == "system" || s->hasPlatformId(PlatformIds::IMAGEVIEWER) ||
++		if (hardware == "tool" || hardware == "emulator" || s->hasPlatformId(PlatformIds::IMAGEVIEWER) ||
+ 			s->getName() == "tools" || s->getName() == "emulators" || s->getName() == "imageviewer")
+ 			return true;
+ 	}

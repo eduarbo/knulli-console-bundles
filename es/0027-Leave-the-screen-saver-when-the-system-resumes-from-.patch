@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:02:12 +0000
+Subject: [PATCH] Leave the screen saver when the system resumes from suspend
+
+- A screen saver started before a suspend stayed after the resume: the key
+  that wakes the system never reaches ES. The main loop now compares
+  CLOCK_BOOTTIME with CLOCK_MONOTONIC (SDL's ticks do not count the time
+  asleep): after a resume the screen saver stops and the idle times start
+  over, as on a key, and the next frame is drawn whatever it holds.
+---
+ es-app/src/main.cpp    |  2 ++
+ es-core/src/Window.cpp | 24 +++++++++++++++++++++++-
+ es-core/src/Window.h   |  6 ++++++
+ 3 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 2e58cf61..97f2d08a 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -728,6 +728,8 @@ int main(int argc, char* argv[])
+ 		  //	ps_time = SDL_GetTicks();
+ 		}
+ 
++		window.checkSystemResume();
++
+ 		if (window.isSleeping())
+ 		{
+ 			lastTime = SDL_GetTicks();
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index f9d1a429..38c9d749 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -17,6 +17,7 @@
+ #include <SDL_events.h>
+ #include "ThemeData.h"
+ #include <mutex>
++#include <time.h>
+ #include "components/AsyncNotificationComponent.h"
+ #include "components/PostProcessShaderComponent.h"
+ #include "components/ControllerActivityComponent.h"
+@@ -33,7 +34,7 @@
+ #endif
+ 
+ Window::Window() : mNormalizeNextUpdate(false), mFrameTimeElapsed(0), mFrameCountElapsed(0), mFrameDrawnStart(0), mAverageDeltaTime(10),
+-  mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mIdleVideo(false), mIdleSlides(false), mScreenSaver(NULL), mRenderScreenSaver(false), mClockElapsed(0), mMouseCapture(nullptr), mMenuBackgroundShaderTextureCache(-1)
++  mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mIdleVideo(false), mIdleSlides(false), mSuspendedMs(-1), mScreenSaver(NULL), mRenderScreenSaver(false), mClockElapsed(0), mMouseCapture(nullptr), mMenuBackgroundShaderTextureCache(-1)
+ {			
+ 	mTransitionOffset = 0;
+ 
+@@ -932,6 +933,27 @@ void Window::render()
+ 	}
+ }
+ 
++void Window::checkSystemResume()
++{
++#ifndef WIN32
++	struct timespec boot, mono;
++	if (clock_gettime(CLOCK_BOOTTIME, &boot) != 0 || clock_gettime(CLOCK_MONOTONIC, &mono) != 0)
++		return;
++
++	long long suspended = ((long long)boot.tv_sec - mono.tv_sec) * 1000 + (boot.tv_nsec - mono.tv_nsec) / 1000000;
++	bool resumed = mSuspendedMs >= 0 && suspended - mSuspendedMs > 1000;
++	mSuspendedMs = suspended;
++
++	if (!resumed)
++		return;
++
++	LOG(LogInfo) << "Window: back from a system suspend; the screen saver stops";
++	cancelScreenSaver();
++	updateIdlePause();
++	Renderer::invalidateFrame();
++#endif
++}
++
+ bool Window::drawsOnlyChanges()
+ {
+ 	return mGuiStack.size() == 1 && !mRenderScreenSaver && !mSleeping && Settings::getInstance()->getBool("RenderOnChange");
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 5ae98814..7c5aef20 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -97,6 +97,11 @@ public:
+ 	bool cancelScreenSaver();
+ 	void renderScreenSaver();
+ 
++	// Back from a system suspend (the time asleep counts in CLOCK_BOOTTIME, not in CLOCK_MONOTONIC or SDL's
++	// ticks): the screen saver stops and the idle times start over, as on a key, so the view shows at once
++	// (the key that woke the system never reaches ES). Called on every turn of the main loop.
++	void checkSystemResume();
++
+ 	void postToUiThread(const std::function<void()>& func, void* data = nullptr);
+ 	void unregisterPostedFunctions(void* data);
+ 	void reactivateGui();
+@@ -183,6 +188,7 @@ private:
+ 	unsigned int mTimeSinceLastInput;
+ 	bool mIdleVideo;
+ 	bool mIdleSlides;
++	long long mSuspendedMs;	// CLOCK_BOOTTIME less CLOCK_MONOTONIC at the last check; -1 before the first
+ 	void updateIdlePause();
+ 
+ 	bool mRenderedHelpPrompts;

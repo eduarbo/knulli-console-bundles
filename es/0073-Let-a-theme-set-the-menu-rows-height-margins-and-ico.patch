@@ -1,0 +1,271 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:41:05 +0000
+Subject: [PATCH] Let a theme set the menu rows' height, margins and icon size
+
+On a 640x480 screen menu rows were as high as their text (22 px),
+their icons a little over a letter high and their content 10 px from
+the edges, so a full-screen menu crowded its rows at the top and
+left a third of the screen empty. A list cut its last row in half
+at its bottom edge.
+
+menutext gains rowHeight (a row's least height; groups keep theirs),
+rowPadding (the margin inside rows), iconSize (the rows' icons) and
+fullRows: a list then scrolls by whole rows and leaves out a row it
+cannot show whole. Without them lists are unchanged.
+---
+ THEMES.md                                | 10 +++-
+ es-core/src/ThemeData.cpp                | 13 +++++
+ es-core/src/ThemeData.h                  | 10 ++++
+ es-core/src/components/ComponentList.cpp | 68 ++++++++++++++++++++----
+ es-core/src/components/ComponentList.h   |  1 +
+ es-core/src/components/MenuComponent.cpp |  2 +-
+ 6 files changed, 93 insertions(+), 11 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 9c40de5b..217f2aa8 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -840,7 +840,7 @@ ES versions with slides support the feature `slideshow`.
+ 	- The tiles of a menu's image grid (the save states)
+ * `menuKeyboard name="menukeyboard"` - PATH | FOCUSEDPATH | ACTIVEPATH | CORNERSIZE | SPACING | FONTPATH | FONTSIZE | COLOR | SELECTEDCOLOR | WORDKEYS | FOCUSKEYS
+ 	- The on-screen keyboard's keys
+-* `menuText name="menutext"` - FONTPATH | FONTSIZE | COLOR
++* `menuText name="menutext"` - FONTPATH | FONTSIZE | COLOR | ROWHEIGHT | ROWPADDING | ICONSIZE | FULLROWS
+ 	- text for all menu entries
+ * `menuText name="menutitle"` - FONTPATH | FONTSIZE | COLOR
+ 	- text for menu titles
+@@ -1463,6 +1463,14 @@ BATOCERA 5.24
+ 	- Default is 878787FF. Color of the selector bar.
+ * `selectorColorEnd` - type: NORMALIZED_PAIR. 
+     - Bottom color for the gradient of the "selector bar."
++* `rowHeight` - type: FLOAT. (`menutext` only)
++	- A list row's least height, as a fraction of the screen height (groups keep their own). Default: the row's content.
++* `rowPadding` - type: FLOAT. (`menutext` only)
++	- The margin left and right inside list rows, as a fraction of the screen width. Default is 10 pixels.
++* `iconSize` - type: FLOAT. (`menutext` only)
++	- The height of the rows' icons (menuIcons), as a fraction of the screen height. Default: 1.25 times the text's letter height.
++* `fullRows` - type: BOOLEAN. (`menutext` only)
++	- Lists show whole rows only: they scroll by rows and leave out a row they cannot show whole. Default is false.
+ 	
+ 
+ #### menuSwitch
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 5899c55b..319c5768 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -636,6 +636,10 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 	{ "menuText", {
+ 		{ "fontPath", PATH },
+ 		{ "fontSize", FLOAT },
++		{ "rowHeight", FLOAT },
++		{ "rowPadding", FLOAT },
++		{ "iconSize", FLOAT },
++		{ "fullRows", BOOLEAN },
+ 		{ "separatorColor", COLOR },
+ 		{ "selectorColor", COLOR },
+ 		{ "selectorColorEnd", COLOR },
+@@ -2463,6 +2467,15 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			Text.selectorGradientColor = elem->get<unsigned int>("selectorColorEnd");
+ 		if (elem->has("selectorGradientType"))
+ 			Text.selectorGradientType = (elem->get<std::string>("selectorGradientType").compare("horizontal"));
++
++		if (elem->has("rowHeight"))
++			Row.height = elem->get<float>("rowHeight") * Renderer::getScreenHeight();
++		if (elem->has("rowPadding"))
++			Row.padding = elem->get<float>("rowPadding") * Renderer::getScreenWidth();
++		if (elem->has("iconSize"))
++			Row.iconSize = elem->get<float>("iconSize") * Renderer::getScreenHeight();
++		if (elem->has("fullRows"))
++			Row.fullRows = elem->get<bool>("fullRows");
+ 	}
+ 
+ 
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index afcfcd3e..f91642f4 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -176,6 +176,15 @@ struct ButtonElement
+ 	float		height;			// minimum height in pixels; 0: the label's
+ };
+ 
++// The rows of menu lists (menutext rowHeight, rowPadding, iconSize, fullRows)
++struct MenuRowElement
++{
++	float height;	// a row's least height, in pixels; 0: its content's
++	float padding;	// the margin left and right inside a row, in pixels
++	float iconSize;	// pixels; 0: 1.25 times the text's letter height
++	bool fullRows;	// lists show whole rows only
++};
++
+ // The text field of the on-screen keyboard and of other text popups (menuTextEdit)
+ struct TextEditElement
+ {
+@@ -225,6 +234,7 @@ public:
+ 		IconElement Icons { ":/on.svg", ":/off.svg", ":/auto.svg", ":/option_arrow.svg", ":/arrow.svg", ":/slider_knob.svg", ":/textinput_ninepatch.png", ":/textinput_ninepatch_active.png" };
+ 		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16), 0, 0, 0.0f };
+ 		TextEditElement TextEdit { nullptr, 0 };
++		MenuRowElement Row { 0.0f, 10.0f, 0.0f, false };
+ 		TileElement Tile { "", "", Vector2f(16, 16) };
+ 		KeyboardElement Keyboard { "", "", "", Vector2f(16, 16), 0.0f, 0xFFFFFFFF, 0xFFFFFFFF, nullptr, false, false };
+ 
+diff --git a/es-core/src/components/ComponentList.cpp b/es-core/src/components/ComponentList.cpp
+index 9c8a852e..3ccb5512 100644
+--- a/es-core/src/components/ComponentList.cpp
++++ b/es-core/src/components/ComponentList.cpp
+@@ -8,7 +8,8 @@
+ #include "components/OptionListComponent.h"
+ #include "InputManager.h"
+ 
+-#define TOTAL_HORIZONTAL_PADDING_PX 20
++// The margin left and right inside a row: the theme's (menutext rowPadding), else 10 pixels
++static float rowPadding() { return ThemeData::getMenuTheme()->Row.padding; }
+ 
+ ComponentList::ComponentList(Window* window) : IList<ComponentListRow, std::string>(window, LIST_SCROLL_STYLE_SLOW, LIST_NEVER_LOOP), mScrollbar(window)
+ {
+@@ -88,7 +89,7 @@ void ComponentList::addGroup(const std::string& label, bool forceVisible)
+ 		group->setRenderBackground(true);
+ 
+ 	group->setLineSpacing(theme->Group.lineSpacing);
+-	group->setPadding(Vector4f(TOTAL_HORIZONTAL_PADDING_PX / 2, 0, TOTAL_HORIZONTAL_PADDING_PX / 2, 0));
++	group->setPadding(Vector4f(rowPadding(), 0, rowPadding(), 0));
+ 
+ 	row.addElement(group, true);
+ 	row.selectable = false;
+@@ -305,7 +306,31 @@ void ComponentList::updateCameraOffset()
+ 			i++;
+ 		}
+ 
+-		if(mCameraOffset < 0)
++		if (ThemeData::getMenuTheme()->Row.fullRows)
++		{
++			// Whole rows only (menutext fullRows): the camera stays on a row's top, never past the first row
++			// from which the rest fits, and the cursor's row is whole
++			float last = 0;
++			for (unsigned int j = 0; j < mEntries.size() && totalHeight - last > mSize.y(); j++)
++				last += getRowHeight(mEntries.at(j).data);
++
++			if (mCameraOffset > last)
++				mCameraOffset = last;
++
++			const float cursorTop = mSelectorBarOffset;
++			const float cursorBottom = cursorTop + getRowHeight(mEntries.at(mCursor).data);
++			if (mCameraOffset > cursorTop)
++				mCameraOffset = cursorTop;
++
++			float top = 0;
++			for (unsigned int j = 0; j < mEntries.size() && cursorBottom > mCameraOffset + mSize.y() && top < cursorTop; j++)
++			{
++				top += getRowHeight(mEntries.at(j).data);
++				if (top > mCameraOffset)
++					mCameraOffset = top;
++			}
++		}
++		else if(mCameraOffset < 0)
+ 			mCameraOffset = 0;
+ 		else if(mCameraOffset + mSize.y() > totalHeight)
+ 			mCameraOffset = totalHeight - mSize.y();
+@@ -314,6 +339,31 @@ void ComponentList::updateCameraOffset()
+ 		mCameraOffset = 0;
+ }
+ 
++// The height a list shows: all of it, or with whole rows only, down to the last whole row under the camera
++float ComponentList::getShownHeight() const
++{
++	if (!ThemeData::getMenuTheme()->Row.fullRows)
++		return mSize.y();
++
++	float y = 0;
++	float shown = 0;
++	for (auto& entry : mEntries)
++	{
++		float h = getRowHeight(entry.data);
++		if (y >= mCameraOffset - 0.5f)
++		{
++			if (y + h - mCameraOffset > mSize.y() + 0.5f)
++				break;
++
++			shown = y + h - mCameraOffset;
++		}
++
++		y += h;
++	}
++
++	return shown;
++}
++
+ void ComponentList::render(const Transform4x4f& parentTrans)
+ {
+ 	if (!size())
+@@ -331,8 +381,8 @@ void ComponentList::render(const Transform4x4f& parentTrans)
+ 
+ 	Transform4x4f trans = parentTrans * getTransform();
+ 
+-	// clip everything to be inside our bounds
+-	Vector3f dim(mSize.x(), mSize.y(), 0);
++	// clip everything to be inside our bounds (with whole rows only, to the last whole row)
++	Vector3f dim(mSize.x(), getShownHeight(), 0);
+ 	dim = trans * dim - trans.translation();
+ 
+ 	Renderer::pushClipRect(trans.translation().x(), trans.translation().y(), Math::round(dim.x()), Math::round(dim.y() + 1));
+@@ -460,7 +510,7 @@ float ComponentList::getRowHeight(const ComponentListRow& row) const
+ 	if (sz == 0)
+ 		return 0;
+ 	else if (sz == 1)
+-		return row.elements[0].component->getSize().y();
++		return row.group ? row.elements[0].component->getSize().y() : Math::max(row.elements[0].component->getSize().y(), ThemeData::getMenuTheme()->Row.height);
+ 
+ 	// returns the highest component height found in the row
+ 	float height = 0;
+@@ -472,7 +522,7 @@ float ComponentList::getRowHeight(const ComponentListRow& row) const
+ 			height = h;
+ 	}
+ 
+-	return height;
++	return row.group ? height : Math::max(height, ThemeData::getMenuTheme()->Row.height);
+ }
+ 
+ float ComponentList::getTotalRowHeight() const
+@@ -496,7 +546,7 @@ void ComponentList::updateElementPosition(const ComponentListRow& row, float yOf
+ 	// assumes updateElementSize has already been called
+ 	float rowHeight = getRowHeight(row);
+ 
+-	float x = row.selectable ? TOTAL_HORIZONTAL_PADDING_PX / 2 : 0;
++	float x = row.selectable ? rowPadding() : 0;
+ 	for(unsigned int i = 0; i < row.elements.size(); i++)
+ 	{
+ 		const auto comp = row.elements.at(i).component;
+@@ -509,7 +559,7 @@ void ComponentList::updateElementPosition(const ComponentListRow& row, float yOf
+ 
+ void ComponentList::updateElementSize(const ComponentListRow& row)
+ {
+-	float width = mSize.x() - (row.selectable ? TOTAL_HORIZONTAL_PADDING_PX : 0);
++	float width = mSize.x() - (row.selectable ? 2 * rowPadding() : 0);
+ 	std::vector< std::shared_ptr<GuiComponent> > resizeVec;
+ 
+ 	for(auto it = row.elements.cbegin(); it != row.elements.cend(); it++)
+diff --git a/es-core/src/components/ComponentList.h b/es-core/src/components/ComponentList.h
+index d5ca22ac..297c65c9 100644
+--- a/es-core/src/components/ComponentList.h
++++ b/es-core/src/components/ComponentList.h
+@@ -97,6 +97,7 @@ public:
+ 	std::string getSelectedUserData();
+ 	
+ 	float getTotalRowHeight() const;
++	float getShownHeight() const;
+ 	inline float getRowHeight(int row) const { return getRowHeight(mEntries.at(row).data); }
+ 
+ 	inline void setCursorChangedCallback(const std::function<void(CursorState state)>& callback) { mCursorChangedCallback = callback; };
+diff --git a/es-core/src/components/MenuComponent.cpp b/es-core/src/components/MenuComponent.cpp
+index 769e932d..e9ab377c 100644
+--- a/es-core/src/components/MenuComponent.cpp
++++ b/es-core/src/components/MenuComponent.cpp
+@@ -97,7 +97,7 @@ void MenuComponent::addMenuIcon(Window* window, ComponentListRow& row, const std
+ 		auto icon = std::make_shared<ImageComponent>(window, true);
+ 		icon->setImage(iconPath);
+ 		icon->setColorShift(theme->Text.color);
+-		icon->setResize(0, theme->Text.font->getLetterHeight() * 1.25f);
++		icon->setResize(0, theme->Row.iconSize > 0 ? theme->Row.iconSize : theme->Text.font->getLetterHeight() * 1.25f);
+ 		row.addElement(icon, false);
+ 
+ 		// spacer between icon and text

@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 10:05:46 +0000
+Subject: [PATCH] Let a theme keep a video's orientation in its size
+
+A grid tile could take a TV game's 4:3 (3:4 for a game turned
+upright) with its "screen" size mode; a video element sized by the
+theme could only stretch to its size or fit in it, and its snapshot
+always fitted. With keepOrientation, a video sized by the theme and
+its snapshot take the size's shape turned to their own orientation,
+centred, as the tiles do.
+---
+ THEMES.md                                    |  2 ++
+ es-core/src/ThemeData.cpp                    |  1 +
+ es-core/src/components/VideoComponent.cpp    |  3 +++
+ es-core/src/components/VideoVlcComponent.cpp | 11 ++++++++++-
+ 4 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 17e900bb..17c39d2a 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1039,6 +1039,8 @@ is read again 30 seconds later; after three such timeouts it counts as no video
+ 	- If only one axis is specified (and the other is zero), the other will be automatically calculated in accordance with the video's aspect ratio.
+ * `maxSize` - type: NORMALIZED_PAIR.
+ 	- The video will be resized as large as possible so that it fits within this size and maintains its aspect ratio.  Use this instead of `size` when you don't know what kind of video you're using so it doesn't get grossly oversized on one axis (e.g. with a game's video metadata).
++* `keepOrientation` - type: BOOLEAN.
++	- With `size`: a video (and its snapshot) turned the other way than the size keeps its orientation: it takes the size's shape turned (a TV game's 4:3, an upright one's 3:4), centred.  Default is false.
+ * `origin` - type: NORMALIZED_PAIR.
+ 	- Where on the image `pos` refers to.  For example, an origin of `0.5 0.5` and a `pos` of `0.5 0.5` would place the image exactly in the middle of the screen.  If the "POSITION" and "SIZE" attributes are themable, "ORIGIN" is implied.
+ * `rotation` - type: FLOAT.
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 3f82df69..861f2363 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -586,6 +586,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		// video properties
+ 		{ "maxSize", NORMALIZED_PAIR },
+ 		{ "minSize", NORMALIZED_PAIR },
++		{ "keepOrientation", BOOLEAN },			// with size: a video or snapshot turned the other way keeps its orientation
+ 		{ "default", PATH },
+ 		{ "path", PATH },
+ 		{ "delay", FLOAT },
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index b7bbc96c..51301720 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -317,6 +317,9 @@ void VideoComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, const s
+ 		Vector4f clientRectangle = getParent() ? getParent()->getClientRect() : Vector4f(0, 0, (float)Renderer::getScreenWidth(), (float)Renderer::getScreenHeight());
+ 		Vector2f scale = Vector2f(clientRectangle.z(), clientRectangle.w());
+ 
++		// A size's shape, turned to the video's (or the snapshot's) orientation (a TV game's 4:3, 3:4 upright)
++		setKeepOrientation(elem->has("keepOrientation") && elem->get<bool>("keepOrientation"));
++
+ 		if (elem->has("size"))
+ 		{
+ 			auto sz = mSourceBounds.zw() = elem->get<Vector2f>("size");
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index cc66de01..6642a246 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -343,7 +343,16 @@ void VideoVlcComponent::setResize(float width, float height)
+ 	mSize = mTargetSize;
+ 	mTargetIsMax = false;
+ 	mTargetIsMin = false;
+-	mStaticImage.setMaxSize(width, height);
++
++	// the snapshot takes the same shape as the video: the size's, turned to its own orientation
++	if (mKeepOrientation)
++	{
++		mStaticImage.setKeepOrientation(true);
++		mStaticImage.setResize(width, height);
++	}
++	else
++		mStaticImage.setMaxSize(width, height);
++
+ 	resize();
+ }
+ 

@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:29:39 +0000
+Subject: [PATCH] Let a theme give the save states' tiles images and icons
+
+The save state sheet filled its selected tile with the selector's
+colour and drew the others with no container at all, and its new
+game and new autosave tiles had the same icon.
+
+A menuTile element gives the tiles a background and a selected
+background, drawn as they are, with 8 pixels between tiles; the
+menuIcons iconNewGame and iconAutoSave give those two tiles their
+own icons. Without them the sheet is unchanged.
+---
+ THEMES.md                        | 18 +++++++++++++++++-
+ es-app/src/guis/GuiSaveState.cpp | 32 ++++++++++++++++++++++++++------
+ es-core/src/ThemeData.cpp        | 15 +++++++++++++++
+ es-core/src/ThemeData.h          |  9 +++++++++
+ 4 files changed, 67 insertions(+), 7 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 46148c3f..9c40de5b 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -836,6 +836,8 @@ ES versions with slides support the feature `slideshow`.
+ 	- Images for menu buttons
+ * `menuTextEdit name="menutextedit"` - ACTIVE | INACTIVE | FONTPATH | FONTSIZE | CARETCOLOR
+ 	- The text field of the on-screen keyboard and other text popups
++* `menuTile name="menutile"` - PATH | SELECTEDPATH | CORNERSIZE
++	- The tiles of a menu's image grid (the save states)
+ * `menuKeyboard name="menukeyboard"` - PATH | FOCUSEDPATH | ACTIVEPATH | CORNERSIZE | SPACING | FONTPATH | FONTSIZE | COLOR | SELECTEDCOLOR | WORDKEYS | FOCUSKEYS
+ 	- The on-screen keyboard's keys
+ * `menuText name="menutext"` - FONTPATH | FONTSIZE | COLOR
+@@ -1505,6 +1507,19 @@ BATOCERA 5.24 - replace the textbox background images in OSK
+   - The caret's colour, kept at full strength while the field is not edited (the on-screen keyboard types into
+     it from its keys). Default: the menu text's colour, dimmed while the field is not edited.
+ 
++#### menuTile
++
++The tiles of a menu's image grid, the save states' (`menuTile name="menutile"`). Without `path` and `selectedPath`
++the tiles keep their stock look, the selected one filled with `menutext`'s `selectorColor`. With them the grid
++leaves 8 pixels between tiles and draws both images as they are.
++
++* `path` - type: PATH.
++  - A tile's background (ninepatch).
++* `selectedPath` - type: PATH.
++  - The selected tile's background.
++* `cornerSize` - type: NORMALIZED_PAIR.
++  - The images' corner size, in pixels. Default is `16 16`.
++
+ #### menuKeyboard
+ 
+ The on-screen keyboard's keys (`menuKeyboard name="menukeyboard"`). Without `path` and `focusedPath` the keyboard
+@@ -1538,7 +1553,8 @@ keeps its stock look. The images are ninepatches drawn as they are, with no tint
+ BATOCERA 5.24 - Add images to menuitems
+ 
+ * `*` - type: PATH. 
+-  - Element name must be the image name in the list : iconSystem, iconUpdates, iconControllers, iconGames, iconUI, iconSound, iconNetwork, iconScraper, iconAdvanced, iconQuit, iconRetroachievements, iconKodi, iconRestart, iconShutdown, iconFastShutdown
++  - Element name must be the image name in the list : iconSystem, iconUpdates, iconControllers, iconGames, iconUI, iconSound, iconNetwork, iconScraper, iconAdvanced, iconQuit, iconRetroachievements, iconKodi, iconRestart, iconShutdown, iconFastShutdown,
++    iconNewGame and iconAutoSave (the save states' tiles that start a new game and a new autosave)
+ 
+ #### controllerActivity
+ 
+diff --git a/es-app/src/guis/GuiSaveState.cpp b/es-app/src/guis/GuiSaveState.cpp
+index 9a21a260..ce5a8a27 100644
+--- a/es-app/src/guis/GuiSaveState.cpp
++++ b/es-app/src/guis/GuiSaveState.cpp
+@@ -43,13 +43,28 @@ GuiSaveState::GuiSaveState(Window* window, FileData* game, const std::function<v
+ 	float sh = (float)Math::min(Renderer::getScreenHeight(), Renderer::getScreenWidth());
+ 	sh = (float) theme->TextSmall.font->getSize() / sh;
+ 
++	// A theme's tiles (menuTile): its images as drawn, the selected one by its own image (a border, not a
++	// fill), 8 px between tiles; else the stock tiles, the selected one filled with the selector's colour
++	auto& tile = theme->Tile;
++	bool themedTiles = !tile.path.empty();
++
++	std::string gridSpacing = themedTiles ? "  <margin>8 0</margin>  <padding>4 6 4 6</padding>" : "  <margin>0.01 0.02</margin>  <padding>0 0</padding>";
++	std::string tileBackground = themedTiles ?
++		"  <backgroundImage>" + tile.path + "</backgroundImage>"
++		"  <backgroundCornerSize>" + std::to_string(tile.cornerSize.x()) + " " + std::to_string(tile.cornerSize.y()) + "</backgroundCornerSize>"
++		"  <backgroundColor>FFFFFFFF</backgroundColor>" :
++		"  <backgroundColor>FFFFFF00</backgroundColor>";
++	std::string selectedBackground = themedTiles ?
++		"  <backgroundImage>" + tile.selectedPath + "</backgroundImage>"
++		"  <backgroundColor>FFFFFFFF</backgroundColor>" :
++		"  <backgroundColor>" + Utils::String::toHexString(theme->Text.selectorColor) + "</backgroundColor>";
++
+ 	std::string xml =
+ 		"<theme defaultView=\"Tiles\">"
+ 		"<formatVersion>7</formatVersion>"
+ 		"<view name = \"grid\">"
+ 		"<imagegrid name=\"gamegrid\">"
+-		"  <margin>0.01 0.02</margin>"
+-		"  <padding>0 0</padding>"
++		+ gridSpacing +
+ 		"  <scrollDirection>horizontal</scrollDirection>"
+ 		"  <autoLayout>" + std::to_string(slots * screenProportion / cellProportion) +" 1</autoLayout>"
+ 		"  <autoLayoutSelectedZoom>1</autoLayoutSelectedZoom>"
+@@ -57,12 +72,12 @@ GuiSaveState::GuiSaveState(Window* window, FileData* game, const std::function<v
+ 		"  <centerSelection>false</centerSelection>"		
+ 		"</imagegrid>"		
+ 		"<gridtile name=\"default\">"
+-		"  <backgroundColor>FFFFFF00</backgroundColor>"
++		+ tileBackground +
+ 		"  <padding>8 8</padding>"
+ 		"  <imageColor>FFFFFFFF</imageColor>"
+ 		"</gridtile>"		
+ 		"<gridtile name=\"selected\">"
+-		"  <backgroundColor>" + Utils::String::toHexString(theme->Text.selectorColor) + "</backgroundColor>"
++		+ selectedBackground +
+ 		"</gridtile>"
+ 		"<text name=\"gridtile\">"
+ 		"  <color>" + Utils::String::toHexString(theme->Text.color) + "</color>"
+@@ -122,13 +137,18 @@ void GuiSaveState::loadGrid()
+ 		});
+ 
+ 
+-	mGrid->add(_("START NEW GAME"), ":/freeslot.svg", SaveStateItem(mRepository->getDefaultNewGameSaveState()));
++	// The theme's icons for a new game and a new autosave (menuIcons iconNewGame, iconAutoSave)
++	auto theme = ThemeData::getMenuTheme();
++	std::string newGameIcon = theme->getMenuIcon("iconNewGame");
++	std::string autoSaveIcon = theme->getMenuIcon("iconAutoSave");
++
++	mGrid->add(_("START NEW GAME"), newGameIcon.empty() ? ":/freeslot.svg" : newGameIcon, SaveStateItem(mRepository->getDefaultNewGameSaveState()));
+ 
+ 	if (mRepository->supportsAutoSave() && mGame->getCurrentGameSetting("autosave") == "1")
+ 	{
+ 		auto autoSave = std::find_if(states.cbegin(), states.cend(), [](SaveState* x) { return x->slot == -1; });
+ 		if (autoSave == states.cend())
+-			mGrid->add(_("START NEW AUTO SAVE"), ":/freeslot.svg", SaveStateItem(mRepository->getDefaultAutoSaveSaveState()));
++			mGrid->add(_("START NEW AUTO SAVE"), autoSaveIcon.empty() ? ":/freeslot.svg" : autoSaveIcon, SaveStateItem(mRepository->getDefaultAutoSaveSaveState()));
+ 	}
+ 
+ 	for (auto item : states)
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 77223d42..5899c55b 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -686,6 +686,10 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "fontPath", PATH },
+ 		{ "fontSize", FLOAT },
+ 		{ "caretColor", COLOR } } },
++	{ "menuTile",{
++		{ "path", PATH },
++		{ "selectedPath", PATH },
++		{ "cornerSize", NORMALIZED_PAIR } } },
+ 	{ "menuKeyboard",{
+ 		{ "path", PATH },
+ 		{ "focusedPath", PATH },
+@@ -2522,6 +2526,17 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			TextEdit.caretColor = elem->get<unsigned int>("caretColor");
+ 	}
+ 
++	elem = theme->getElement("menu", "menutile", "menuTile");
++	if (elem && elem->has("path") && elem->has("selectedPath") &&
++		ResourceManager::getInstance()->fileExists(elem->get<std::string>("path")) &&
++		ResourceManager::getInstance()->fileExists(elem->get<std::string>("selectedPath")))
++	{
++		Tile.path = elem->get<std::string>("path");
++		Tile.selectedPath = elem->get<std::string>("selectedPath");
++		if (elem->has("cornerSize"))
++			Tile.cornerSize = elem->get<Vector2f>("cornerSize");
++	}
++
+ 	elem = theme->getElement("menu", "menukeyboard", "menuKeyboard");
+ 	if (elem && elem->has("path") && elem->has("focusedPath") &&
+ 		ResourceManager::getInstance()->fileExists(elem->get<std::string>("path")) &&
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index fd150054..afcfcd3e 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -183,6 +183,14 @@ struct TextEditElement
+ 	unsigned int caretColor;	// 0: the menu text's colour, dimmed while the field is not edited
+ };
+ 
++// The tiles of a menu's image grid, the save states' (menuTile); the stock look while path is empty
++struct TileElement
++{
++	std::string path;			// a tile
++	std::string selectedPath;	// the selected tile
++	Vector2f	cornerSize;
++};
++
+ // The on-screen keyboard's keys (menuKeyboard); the stock look while path is empty
+ struct KeyboardElement
+ {
+@@ -217,6 +225,7 @@ public:
+ 		IconElement Icons { ":/on.svg", ":/off.svg", ":/auto.svg", ":/option_arrow.svg", ":/arrow.svg", ":/slider_knob.svg", ":/textinput_ninepatch.png", ":/textinput_ninepatch_active.png" };
+ 		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16), 0, 0, 0.0f };
+ 		TextEditElement TextEdit { nullptr, 0 };
++		TileElement Tile { "", "", Vector2f(16, 16) };
+ 		KeyboardElement Keyboard { "", "", "", Vector2f(16, 16), 0.0f, 0xFFFFFFFF, 0xFFFFFFFF, nullptr, false, false };
+ 
+ 		std::string getMenuIcon(const std::string name)

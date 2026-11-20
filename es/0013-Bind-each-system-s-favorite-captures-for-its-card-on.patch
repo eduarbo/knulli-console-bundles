@@ -1,0 +1,421 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:05:50 +0000
+Subject: [PATCH] Bind each system's favorite captures for its card on the
+ tabbed home
+
+{system:slides} lists the captures a system card slides through, one path per
+line: the system's favorites that have a screenshot (the systems grouped in it
+included), else its 12 best-rated games that have one, by rating and name.
+Collections, tools, emulators and screenshots have none.
+
+The theme variable "systemslides" says which capture each card shows first and
+which ones it leaves out (title screens, menus, duplicates): one game per line,
+"+" or "-", the game's own system and its path as the gamelist writes it. "%",
+"=", "<", ">" and "$" in a path are escaped, since a theme variable holding them is
+read as an expression. The list is made once and made again when a game changes.
+---
+ THEMES.md                 |  20 +++++
+ THEMES_BINDINGS.md        |   1 +
+ es-app/CMakeLists.txt     |   2 +
+ es-app/src/HomeSlides.cpp | 150 ++++++++++++++++++++++++++++++++++++++
+ es-app/src/HomeSlides.h   |  45 ++++++++++++
+ es-app/src/SystemData.cpp |  55 ++++++++++++++
+ es-app/src/SystemData.h   |  11 +++
+ 7 files changed, 284 insertions(+)
+ create mode 100644 es-app/src/HomeSlides.cpp
+ create mode 100644 es-app/src/HomeSlides.h
+
+diff --git a/THEMES.md b/THEMES.md
+index 34bf5050..8ee266fe 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -757,6 +757,26 @@ separated by `,`:
+   include can redefine the items of a theme's grid. Without `replace="true"` the first template stays the one used,
+   as before.
+ 
++##### Slides (system grid)
++
++`{system:slides}` lists a system's captures, one path per line, for a `slideshow` in the grid's item template
++(see `slideshow`): its favorites that have a screenshot, else its 12 best-rated games that have one, the systems
++grouped in it included, by rating. Collections, tools, emulators and screenshots have none. The theme variable
++`systemslides` picks the capture each card shows first and leaves out the ones that do not fit (title screens,
++menus, duplicates), one game per line: `+` (first) or `-` (left out), the game's own system, a space and its
++path as the gamelist writes it; `%`, `=`, `<`, `>` and `$` written as `%25`, `%3D`, `%3C`, `%3E` and `%24`:
++
++```xml
++<variables>
++	<systemslides>
++		+snes ./Some Game.sfc
++		-snes ./Some Title Screen.sfc
++	</systemslides>
++</variables>
++```
++
++ES versions with slides support the feature `slideshow`.
++
+ #### menu
+ * `helpsystem name="help"` - ALL
+ 	- The help system style for this view. If not defined, menus will have the same helpsystem as defined in system view.
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index e6969bbd..c7250459 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -47,6 +47,7 @@ lastPlayed                  game                   The game played last ({system
+ continue                    game                   lastPlayed, else the best-rated favorite (else the best-rated game)
+ hasLastPlayed               bool                   lastPlayed exists and still resolves to a game
+ hasContinue                 bool                   continue resolves and is not on tools, emulators or screenshots (X does nothing there)
++slides                      string                 The captures of the system's card, one path per line: favorites with a screenshot, else the 12 best-rated games with one (THEMES.md, Slides)
+ image                       path
+ showManual                  bool
+ showSaveStates              bool
+diff --git a/es-app/CMakeLists.txt b/es-app/CMakeLists.txt
+index 229ed5e4..eee09cdc 100644
+--- a/es-app/CMakeLists.txt
++++ b/es-app/CMakeLists.txt
+@@ -19,6 +19,7 @@ set(ES_HEADERS
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/ThreadedHasher.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/ThreadedBluetooth.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/SystemRandomPlaylist.h
++	${CMAKE_CURRENT_SOURCE_DIR}/src/HomeSlides.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/LangParser.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/KeyboardMapping.h	
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/services/HttpServerThread.h
+@@ -147,6 +148,7 @@ set(ES_SOURCES
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/ThreadedHasher.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/ThreadedBluetooth.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/SystemRandomPlaylist.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/HomeSlides.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/LangParser.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/KeyboardMapping.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/services/HttpServerThread.cpp	
+diff --git a/es-app/src/HomeSlides.cpp b/es-app/src/HomeSlides.cpp
+new file mode 100644
+index 00000000..5bf85fde
+--- /dev/null
++++ b/es-app/src/HomeSlides.cpp
+@@ -0,0 +1,150 @@
++#include "HomeSlides.h"
++
++#include <algorithm>
++
++namespace HomeSlides
++{
++	static std::string trim(const std::string& text)
++	{
++		const char* blanks = " \t\r\n";
++		size_t first = text.find_first_not_of(blanks);
++		if (first == std::string::npos)
++			return "";
++
++		size_t last = text.find_last_not_of(blanks);
++		return text.substr(first, last - first + 1);
++	}
++
++	static int hexValue(char c)
++	{
++		if (c >= '0' && c <= '9') return c - '0';
++		if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++		if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++		return -1;
++	}
++
++	// %XX sequences back to their character; anything else is kept as written
++	static std::string decode(const std::string& text)
++	{
++		std::string out;
++		out.reserve(text.size());
++
++		for (size_t i = 0; i < text.size(); i++)
++		{
++			if (text[i] == '%' && i + 2 < text.size())
++			{
++				int high = hexValue(text[i + 1]);
++				int low = hexValue(text[i + 2]);
++				if (high >= 0 && low >= 0)
++				{
++					out += (char)(high * 16 + low);
++					i += 2;
++					continue;
++				}
++			}
++
++			out += text[i];
++		}
++
++		return out;
++	}
++
++	std::string key(const std::string& system, const std::string& relativePath)
++	{
++		return system + " " + relativePath;
++	}
++
++	Rules parseRules(const std::string& definition)
++	{
++		Rules rules;
++
++		size_t start = 0;
++		while (start <= definition.size())
++		{
++			size_t end = definition.find('\n', start);
++			if (end == std::string::npos)
++				end = definition.size();
++
++			std::string line = trim(definition.substr(start, end - start));
++			start = end + 1;
++
++			if (line.size() < 4 || (line[0] != '+' && line[0] != '-'))
++				continue;
++
++			size_t space = line.find(' ');
++			if (space == std::string::npos || space < 2)
++				continue;
++
++			std::string system = line.substr(1, space - 1);
++			std::string path = decode(trim(line.substr(space + 1)));
++			if (path.empty())
++				continue;
++
++			if (line[0] == '+')
++				rules.representatives.insert(key(system, path));
++			else
++				rules.excluded.insert(key(system, path));
++		}
++
++		return rules;
++	}
++
++	// The best first; equal ratings by name, so the order does not depend on the gamelist's
++	static bool byRating(const Candidate& a, const Candidate& b)
++	{
++		if (a.rating != b.rating)
++			return a.rating > b.rating;
++
++		return a.name < b.name;
++	}
++
++	// The favorites with media, else the best-rated games with media (at most fallbackCount), by rating
++	static std::vector<Candidate> pool(std::vector<Candidate>& candidates, size_t fallbackCount)
++	{
++		std::vector<Candidate> withMedia;
++		for (auto& candidate : candidates)
++			if (!candidate.media.empty())
++				withMedia.push_back(candidate);
++
++		std::stable_sort(withMedia.begin(), withMedia.end(), byRating);
++
++		std::vector<Candidate> favorites;
++		for (auto& candidate : withMedia)
++			if (candidate.favorite)
++				favorites.push_back(candidate);
++
++		if (!favorites.empty())
++			return favorites;
++
++		if (withMedia.size() > fallbackCount)
++			withMedia.resize(fallbackCount);
++
++		return withMedia;
++	}
++
++	std::vector<std::string> orderSlides(std::vector<Candidate> candidates, const Rules& rules, size_t fallbackCount)
++	{
++		std::vector<Candidate> kept;
++		for (auto& candidate : candidates)
++			if (rules.excluded.find(candidate.key) == rules.excluded.cend())
++				kept.push_back(candidate);
++
++		// The representatives first, then the cap of a system without favorites (a representative is kept)
++		auto ordered = pool(kept, (size_t)-1);
++		bool favorites = std::any_of(ordered.cbegin(), ordered.cend(), [](const Candidate& c) { return c.favorite; });
++
++		std::stable_partition(ordered.begin(), ordered.end(), [&rules](const Candidate& c)
++		{
++			return rules.representatives.find(c.key) != rules.representatives.cend();
++		});
++
++		if (!favorites && ordered.size() > fallbackCount)
++			ordered.resize(fallbackCount);
++
++		std::vector<std::string> slides;
++		for (auto& candidate : ordered)
++			slides.push_back(candidate.media);
++
++		return slides;
++	}
++}
+diff --git a/es-app/src/HomeSlides.h b/es-app/src/HomeSlides.h
+new file mode 100644
+index 00000000..54194a1f
+--- /dev/null
++++ b/es-app/src/HomeSlides.h
+@@ -0,0 +1,45 @@
++#pragma once
++#ifndef ES_APP_HOME_SLIDES_H
++#define ES_APP_HOME_SLIDES_H
++
++#include <set>
++#include <string>
++#include <vector>
++
++// The tabbed home's slides: the captures a system card slides through.
++// Free of ES types so it can be tested alone.
++namespace HomeSlides
++{
++	// The theme variable "systemslides": one game per line, "+" for the capture a card shows first, "-" for
++	// one it leaves out (a title screen, a menu, a duplicate), then the game's own system, a space and its
++	// path as the gamelist writes it. "%", "=", "<", ">" and "$" in a path are written as %25, %3D, %3C, %3E
++	// and %24 (a theme variable with "=" or "<" is read as an expression):
++	//   +snes ./Some Game.sfc
++	//   -snes ./Some Title Screen.sfc
++	struct Rules
++	{
++		std::set<std::string> representatives;
++		std::set<std::string> excluded;
++	};
++
++	Rules parseRules(const std::string& definition);
++
++	// The key of a game in Rules: its system, a space and its relative path
++	std::string key(const std::string& system, const std::string& relativePath);
++
++	struct Candidate
++	{
++		std::string key;	// as in Rules
++		std::string id;		// what the caller finds the game by (its path)
++		std::string name;
++		std::string media;	// the capture or the video; empty when there is none
++		float rating;		// 0 to 1
++		bool favorite;
++	};
++
++	// A card's captures: its favorites with a capture, else its best-rated games with one (at most
++	// fallbackCount); the excluded left out; the representatives first, then by rating and name.
++	std::vector<std::string> orderSlides(std::vector<Candidate> candidates, const Rules& rules, size_t fallbackCount);
++}
++
++#endif // ES_APP_HOME_SLIDES_H
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 2fd12c91..6541bca1 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -73,6 +73,7 @@ SystemData::SystemData(const SystemMetadata& meta, SystemEnvironmentData* envDat
+ 	mIsGroupSystem = groupedSystem;
+ 	mGameListHash = 0;
+ 	mGameCountInfo = nullptr;
++	mSlidesReady = false;
+ 	mSortId = Settings::getInstance()->getInt(getName() + ".sort");
+ 	mUnlimitedRecursiveDepth = Settings::getInstance()->getBool(getName() + ".unlimited_recursive_depth");
+ 	int depth;
+@@ -1498,6 +1499,9 @@ void SystemData::updateDisplayedGameCount()
+ 		delete mGameCountInfo;
+ 
+ 	mGameCountInfo = nullptr;
++
++	// A favorite or a capture changed: the home's slides are made again
++	mSlidesReady = false;
+ }
+ 
+ void SystemData::loadTheme()
+@@ -2154,6 +2158,54 @@ FileData* SystemData::getLastPlayedGame(bool orChefPick)
+ 	return game;
+ }
+ 
++// The games of the system and of the systems grouped in it, each keyed by its own system and its path
++// in that system's folder (as the gamelist and the theme variable "systemslides" write it)
++std::vector<HomeSlides::Candidate> SystemData::getHomeCandidates(bool video)
++{
++	std::vector<HomeSlides::Candidate> candidates;
++	if (mRootFolder == nullptr)
++		return candidates;
++
++	for (auto game : mRootFolder->getFilesRecursive(GAME, true))
++	{
++		FileData* source = game->getSourceFileData();
++		SystemData* system = source->getSystem();
++		if (system == nullptr || system->getRootFolder() == nullptr)
++			continue;
++
++		HomeSlides::Candidate candidate;
++		candidate.key = HomeSlides::key(system->getName(), Utils::FileSystem::createRelativePath(source->getPath(), system->getRootFolder()->getPath(), false));
++		candidate.id = game->getPath();
++		candidate.name = game->getName();
++		candidate.media = video ? game->getVideoPath() : game->getImagePath();
++		candidate.rating = Utils::String::toFloat(game->getMetadata(MetaDataId::Rating));
++		candidate.favorite = game->getFavorite();
++
++		if (!candidate.media.empty() && !Utils::FileSystem::exists(candidate.media))
++			candidate.media.clear();
++
++		candidates.push_back(candidate);
++	}
++
++	return candidates;
++}
++
++const std::vector<std::string>& SystemData::getSlides()
++{
++	if (mSlidesReady)
++		return mSlides;
++
++	mSlidesReady = true;
++	mSlides.clear();
++
++	if (isCollection() || isUtilitySystem(this) || mTheme == nullptr)
++		return mSlides;
++
++	auto rules = HomeSlides::parseRules(mTheme->getVariable("systemslides"));
++	mSlides = HomeSlides::orderSlides(getHomeCandidates(false), rules, 12);
++	return mSlides;
++}
++
+ FileData* SystemData::getContinueGame()
+ {
+ 	return isUtilitySystem(this) ? nullptr : getLastPlayedGame(true);
+@@ -2294,6 +2346,9 @@ BindableProperty SystemData::getProperty(const std::string& name)
+ 		return timeText;
+ 	}
+ 
++	if (name == "slides")
++		return Utils::String::join(getSlides(), "\n");
++
+ 	if (name == "lastPlayed" || name == "continue")
+ 	{
+ 		FileData* game = getLastPlayedGame(name == "continue");
+diff --git a/es-app/src/SystemData.h b/es-app/src/SystemData.h
+index 3a62d26b..171a4e9d 100644
+--- a/es-app/src/SystemData.h
++++ b/es-app/src/SystemData.h
+@@ -18,6 +18,7 @@
+ #include "CustomFeatures.h"
+ #include "utils/VectorEx.h"
+ #include "BindingManager.h"
++#include "HomeSlides.h"
+ 
+ class FileData;
+ class FolderData;
+@@ -120,6 +121,11 @@ public:
+ 	// The game played last on the console (tools and screenshots left out)
+ 	static FileData* getConsoleLastPlayedGame();
+ 
++	// The tabbed home. The captures the system's card slides through ({system:slides}): its favorites
++	// with one, else its best-rated games, as the theme variable "systemslides" orders and filters them
++	// (HomeSlides::Rules); none on collections and utilities.
++	const std::vector<std::string>& getSlides();
++
+ 	static bool IsManufacturerSupported;
+ 	static bool hasDirtySystems();
+ 	static void deleteSystems();
+@@ -286,6 +292,11 @@ private:
+ 	GameCountInfo* mGameCountInfo;
+ 	SaveStateRepository* mSaveRepository;
+ 
++	std::vector<HomeSlides::Candidate> getHomeCandidates(bool video);
++
++	std::vector<std::string> mSlides;
++	bool mSlidesReady;
++
+ 	bool mHidden;
+ };
+ 

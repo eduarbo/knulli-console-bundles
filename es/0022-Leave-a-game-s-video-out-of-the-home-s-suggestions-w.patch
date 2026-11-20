@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:00:01 +0000
+Subject: [PATCH] Leave a game's video out of the home's suggestions with a "~"
+ rule
+
+- A "~" line in the theme variable "systemslides" (system and path, as "+"
+  and "-") leaves that game's video out of the panel's pool, as if it had
+  none: a recording in black and white on a colour console, say. "-" stays
+  about captures.
+---
+ THEMES.md                 |  4 +++-
+ es-app/src/HomeSlides.cpp | 12 +++++++++---
+ es-app/src/HomeSlides.h   | 11 +++++++----
+ es-app/src/SystemData.cpp |  3 ++-
+ 4 files changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index c06b0684..14b9dfe8 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -772,13 +772,15 @@ separated by `,`:
+ grouped in it included, by rating. Collections, tools, emulators and screenshots have none. The theme variable
+ `systemslides` picks the capture each card shows first and leaves out the ones that do not fit (title screens,
+ menus, duplicates), one game per line: `+` (first) or `-` (left out), the game's own system, a space and its
+-path as the gamelist writes it; `%`, `=`, `<`, `>` and `$` written as `%25`, `%3D`, `%3C`, `%3E` and `%24`:
++path as the gamelist writes it; `%`, `=`, `<`, `>` and `$` written as `%25`, `%3D`, `%3C`, `%3E` and `%24`.
++`~` leaves a game's video out of the panel's suggestions (a black and white recording on a colour console):
+ 
+ ```xml
+ <variables>
+ 	<systemslides>
+ 		+snes ./Some Game.sfc
+ 		-snes ./Some Title Screen.sfc
++		~gbc ./Some Game Recorded On A Game Boy.zip
+ 	</systemslides>
+ </variables>
+ ```
+diff --git a/es-app/src/HomeSlides.cpp b/es-app/src/HomeSlides.cpp
+index 6638dacb..b198d107 100644
+--- a/es-app/src/HomeSlides.cpp
++++ b/es-app/src/HomeSlides.cpp
+@@ -68,7 +68,7 @@ namespace HomeSlides
+ 			std::string line = trim(definition.substr(start, end - start));
+ 			start = end + 1;
+ 
+-			if (line.size() < 4 || (line[0] != '+' && line[0] != '-'))
++			if (line.size() < 4 || (line[0] != '+' && line[0] != '-' && line[0] != '~'))
+ 				continue;
+ 
+ 			size_t space = line.find(' ');
+@@ -82,8 +82,10 @@ namespace HomeSlides
+ 
+ 			if (line[0] == '+')
+ 				rules.representatives.insert(key(system, path));
+-			else
++			else if (line[0] == '-')
+ 				rules.excluded.insert(key(system, path));
++			else
++				rules.noVideo.insert(key(system, path));
+ 		}
+ 
+ 		return rules;
+@@ -148,10 +150,14 @@ namespace HomeSlides
+ 		return slides;
+ 	}
+ 
+-	std::vector<std::string> pickPool(std::vector<Candidate> candidates, size_t fallbackCount)
++	std::vector<std::string> pickPool(std::vector<Candidate> candidates, const Rules& rules, size_t fallbackCount)
+ 	{
+ 		std::vector<std::string> ids;
+ 
++		for (auto& candidate : candidates)
++			if (rules.noVideo.find(candidate.key) != rules.noVideo.cend())
++				candidate.media.clear();
++
+ 		// Favorites without a video: no suggestion rather than games that are not favorites
+ 		bool favorites = std::any_of(candidates.cbegin(), candidates.cend(), [](const Candidate& c) { return c.favorite; });
+ 		if (favorites && std::none_of(candidates.cbegin(), candidates.cend(), [](const Candidate& c) { return c.favorite && !c.media.empty(); }))
+diff --git a/es-app/src/HomeSlides.h b/es-app/src/HomeSlides.h
+index 61c4377f..a1c0613d 100644
+--- a/es-app/src/HomeSlides.h
++++ b/es-app/src/HomeSlides.h
+@@ -12,8 +12,9 @@
+ namespace HomeSlides
+ {
+ 	// The theme variable "systemslides": one game per line, "+" for the capture a card shows first, "-" for
+-	// one it leaves out (a title screen, a menu, a duplicate), then the game's own system, a space and its
+-	// path as the gamelist writes it. "%", "=", "<", ">" and "$" in a path are written as %25, %3D, %3C, %3E
++	// one it leaves out (a title screen, a menu, a duplicate), "~" for a video the panel never suggests (one
++	// in black and white on a colour console), then the game's own system, a space and its path as the
++	// gamelist writes it. "%", "=", "<", ">" and "$" in a path are written as %25, %3D, %3C, %3E
+ 	// and %24 (a theme variable with "=" or "<" is read as an expression):
+ 	//   +snes ./Some Game.sfc
+ 	//   -snes ./Some Title Screen.sfc
+@@ -21,6 +22,7 @@ namespace HomeSlides
+ 	{
+ 		std::set<std::string> representatives;
+ 		std::set<std::string> excluded;
++		std::set<std::string> noVideo;
+ 	};
+ 
+ 	Rules parseRules(const std::string& definition);
+@@ -44,8 +46,9 @@ namespace HomeSlides
+ 
+ 	// The panel's pool, as ids: the favorites with a video; none when there are favorites but none has one
+ 	// (the panel then shows the best-rated favorite); only a system with no favorite at all uses its best-rated
+-	// games with a video (at most fallbackCount). Exclusions are about captures, so they do not apply.
+-	std::vector<std::string> pickPool(std::vector<Candidate> candidates, size_t fallbackCount);
++	// games with a video (at most fallbackCount). A "~" video counts as none; "-" is about captures, so it
++	// does not apply.
++	std::vector<std::string> pickPool(std::vector<Candidate> candidates, const Rules& rules, size_t fallbackCount);
+ 
+ 	// Items in a random order, each shown once before any repeats; a new round never starts with the item
+ 	// shown last. A reset (the list made again after a game changed) keeps the current item while it is still
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 1b23afc8..7f7ba356 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -2256,7 +2256,8 @@ FileData* SystemData::getSuggestedGame()
+ 	if (!mSuggestionsReady)
+ 	{
+ 		mSuggestionsReady = true;
+-		mSuggestions.reset(HomeSlides::pickPool(getHomeCandidates(true), 12), homeRandom());
++		auto rules = HomeSlides::parseRules(mTheme != nullptr ? mTheme->getVariable("systemslides") : "");
++		mSuggestions.reset(HomeSlides::pickPool(getHomeCandidates(true), rules, 12), homeRandom());
+ 	}
+ 
+ 	if (mSuggestions.empty())

@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 04:20:38 +0000
+Subject: [PATCH] Keep verbose game launchers running and report their exit
+ status
+
+---
+ es-core/src/utils/Platform.cpp | 33 ++++++++++++++++++++++++++++-----
+ 1 file changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/es-core/src/utils/Platform.cpp b/es-core/src/utils/Platform.cpp
+index d2ab1f85..ef1e8fbf 100644
+--- a/es-core/src/utils/Platform.cpp
++++ b/es-core/src/utils/Platform.cpp
+@@ -22,6 +22,7 @@
+ #include "Scripting.h"
+ #include "Paths.h"
+ #include <fstream>
++#include <cstdio>
+ #include <string>
+ #include <cctype>
+ #include <algorithm>
+@@ -146,12 +147,34 @@ namespace Utils
+ 
+ 			return 1;
+ #else
+-			std::string cmdOutput = " 2> " + Utils::FileSystem::combine(Paths::getLogPath(), stderrFilename) + " | head -300 > " + Utils::FileSystem::combine(Paths::getLogPath(), stdoutFilename);
+-			if (!Log::enabled())
+-				cmdOutput = " 2> /dev/null | head -300 > /dev/null";
+-
++			const bool logOutput = Log::enabled();
++			const std::string errors = logOutput ? Utils::FileSystem::getEscapedPath(Utils::FileSystem::combine(Paths::getLogPath(), stderrFilename)) : "/dev/null";
++			const std::string output = logOutput ? Utils::FileSystem::combine(Paths::getLogPath(), stdoutFilename) : "/dev/null";
+ 			if (waitForExit)
+-				return system((cmd_utf8 + cmdOutput).c_str());
++			{
++				// Keep the first 300 lines and drain the rest. Closing the read end early
++				// sends SIGPIPE to verbose launchers and can terminate a running game.
++				FILE* child = popen((cmd_utf8 + " 2> " + errors).c_str(), "r");
++				if (!child)
++					return 1;
++				std::ofstream log(output, std::ios::binary);
++				char buffer[8192];
++				int remaining = 300;
++				size_t size;
++				while ((size = fread(buffer, 1, sizeof(buffer), child)) > 0)
++				{
++					size_t kept = 0;
++					while (kept < size && remaining > 0)
++						if (buffer[kept++] == '\n')
++							--remaining;
++					if (kept && log)
++						log.write(buffer, kept);
++				}
++				int status = pclose(child);
++				if (status < 0) return 1;
++				return WIFEXITED(status) ? WEXITSTATUS(status) : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
++			}
++			std::string cmdOutput = " 2> " + errors + " | sed -n '1,300p' > " + Utils::FileSystem::getEscapedPath(output);
+ 
+ 			// fork the current process
+ 			pid_t ret = fork();

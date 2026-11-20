@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:47:13 +0000
+Subject: [PATCH] Give quick access's screensaver row an icon name of its own
+
+Quick access took the scraper's icon for its screensaver row, so a
+theme with menu icons showed a magnifier there and no icon on the
+other rows unless it drew one for each.
+
+The row now asks for iconScreensaver when the theme has it, and the
+scraper's icon as before when it does not. THEMES.md lists the other
+icon names quick access and the quit menu ask for.
+---
+ THEMES.md                   | 3 ++-
+ es-app/src/guis/GuiMenu.cpp | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 936d3928..dd6241de 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1598,7 +1598,8 @@ BATOCERA 5.24 - Add images to menuitems
+ 
+ * `*` - type: PATH. 
+   - Element name must be the image name in the list : iconSystem, iconUpdates, iconControllers, iconGames, iconUI, iconSound, iconNetwork, iconScraper, iconAdvanced, iconQuit, iconRetroachievements, iconKodi, iconRestart, iconShutdown, iconFastShutdown,
+-    iconNewGame and iconAutoSave (the save states' tiles that start a new game and a new autosave)
++    iconNewGame and iconAutoSave (the save states' tiles that start a new game and a new autosave), iconScreensaver
++    (quick access's screensaver; default: iconScraper), iconManual, iconPlanemode, iconSound
+ 
+ #### controllerActivity
+ 
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index 9d13d673..0e98ab31 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -4216,7 +4216,7 @@ void GuiMenu::openQuitMenu_static(Window *window, bool quickAccessMenu, bool ani
+ 					});
+ 				delete s;
+ 
+-			}, "iconScraper", true);
++			}, ThemeData::getMenuTheme()->getMenuIcon("iconScreensaver").empty() ? "iconScraper" : "iconScreensaver", true);
+ 
+ 		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::ScriptId::PDFEXTRACTION) && Utils::FileSystem::exists(Paths::getUserManualPath()))
+ 		{

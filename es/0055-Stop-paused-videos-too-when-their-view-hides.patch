@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 03:19:43 +0000
+Subject: [PATCH] Stop paused videos too when their view hides
+
+- A video under a menu is paused, not stopped, and hiding its view stopped
+  only playing ones: a game started from a menu over a view (the save
+  states over a game list) ran with that paused player still holding its
+  outputs. A paused video whose view hides is now stopped, so the wait
+  before a game covers it.
+---
+ es-core/src/components/VideoComponent.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 5b171040..4e177fe8 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -560,6 +560,11 @@ void VideoComponent::manageState()
+ 			}
+ 		}
+ 	}
++	// A video paused under a menu whose view is hidden (a game starts from that menu) stops: a paused player
++	// keeps its sound and video outputs, and the wait before the game (Window::deinit) waits for it too
++	if (!show && !isShowing() && isPaused())
++		stopVideo();
++
+ 	// Need to recheck variable rather than 'else' because it may be modified above
+ 	if (!mIsPlaying)
+ 	{

@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:05:47 +0000
+Subject: [PATCH] Read the version once, early
+
+- The main menu asked knulli-version (a quarter of a second on a handheld)
+  four times each time it opened. The version cannot change while ES runs: it
+  is read once, on a thread while ES loads.
+---
+ es-app/src/ApiSystem.cpp | 29 +++++++++++++++++++++++++++++
+ es-app/src/ApiSystem.h   |  5 +++++
+ es-app/src/main.cpp      |  3 +++
+ 3 files changed, 37 insertions(+)
+
+diff --git a/es-app/src/ApiSystem.cpp b/es-app/src/ApiSystem.cpp
+index 7742d39a..c4f23c97 100644
+--- a/es-app/src/ApiSystem.cpp
++++ b/es-app/src/ApiSystem.cpp
+@@ -24,6 +24,7 @@
+ #include <iostream>
+ #include <fstream>
+ #include <chrono>
++#include <mutex>
+ #include <thread>
+ #include <stdio.h>
+ #include <string.h>
+@@ -155,7 +156,35 @@ bool ApiSystem::isFreeSpaceLimit()
+ 	return getFreeSpaceGB(Paths::getRootPath()) < 2;
+ }
+ 
++// The version cannot change while ES runs (an update applies at the next start), and asking the script takes
++// a quarter of a second on a handheld, several times per main menu: it is asked once, and early (prefetchVersion)
++static std::mutex sVersionLock;
++static bool sVersionKnown = false;
++static std::string sVersion;
++
++void ApiSystem::prefetchVersion()
++{
++	std::thread([] { ApiSystem::getInstance()->getVersion(); }).detach();
++}
++
+ std::string ApiSystem::getVersion(bool extra)
++{
++	if (!extra)
++	{
++		std::unique_lock<std::mutex> lock(sVersionLock);
++		if (!sVersionKnown)
++		{
++			sVersion = readVersion(false);
++			sVersionKnown = true;
++		}
++
++		return sVersion;
++	}
++
++	return readVersion(true);
++}
++
++std::string ApiSystem::readVersion(bool extra)
+ {
+ 	LOG(LogDebug) << "ApiSystem::getVersion";
+ 
+diff --git a/es-app/src/ApiSystem.h b/es-app/src/ApiSystem.h
+index edd13e86..74c42694 100644
+--- a/es-app/src/ApiSystem.h
++++ b/es-app/src/ApiSystem.h
+@@ -141,6 +141,8 @@ public:
+     bool isFreeSpaceLimit();
+ 
+     virtual std::string getVersion(bool extra = false);
++	// Reads the version on a thread now, so the first menu does not wait for it
++	void prefetchVersion();
+ 	virtual std::string getApplicationName();
+ 
+     std::string getRootPassword();
+@@ -305,6 +307,9 @@ public:
+ protected:
+ 	ApiSystem();
+ 
++	// What getVersion asks the system each time (it keeps the answer)
++	std::string readVersion(bool extra);
++
+ 	virtual bool executeScript(const std::string command);  
+ 	virtual std::pair<std::string, int> executeScript(const std::string command, const std::function<void(const std::string)>& func);
+ 	virtual std::vector<std::string> executeEnumerationScript(const std::string command);
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 97f2d08a..9f5b7d29 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -566,6 +566,9 @@ int main(int argc, char* argv[])
+ 
+ 	PowerSaver::init();
+ 
++	// The version the main menu shows, read while ES loads
++	ApiSystem::getInstance()->prefetchVersion();
++
+ 	bool splashScreen = Settings::getInstance()->getBool("SplashScreen");
+ 	bool splashScreenProgress = Settings::getInstance()->getBool("SplashScreenProgress");
+ 

@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 07:50:37 +0000
+Subject: [PATCH] Keep the column slide's fades between 0 and 1
+
+Math::clamp is declared clamp(num, min, max) but defined clamp(min, max,
+num), so clamp(x, 0, 1) only keeps x from going below 0. Near the end of
+a slide into a game list the home's fade went past 1 and wrapped round
+as an opacity byte: the home's column came back opaque over the game's
+details for a frame. The slide's smooth step and the column fades now
+clamp with std::min and std::max.
+---
+ es-app/src/views/ColumnLayout.h     | 3 ++-
+ es-app/src/views/ViewController.cpp | 4 +++-
+ 2 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/es-app/src/views/ColumnLayout.h b/es-app/src/views/ColumnLayout.h
+index 22f6999c..fe80971c 100644
+--- a/es-app/src/views/ColumnLayout.h
++++ b/es-app/src/views/ColumnLayout.h
+@@ -8,6 +8,7 @@
+ #include "math/Misc.h"
+ #include "math/Transform4x4f.h"
+ 
++#include <algorithm>
+ #include <cstdlib>
+ #include <memory>
+ #include <string>
+@@ -80,7 +81,7 @@ struct ColumnLayout
+ 		if (role == SLIDES || (role == BACKGROUND && !fadeBackground))
+ 			return 255;
+ 
+-		return (unsigned char)(Math::clamp(fade, 0.0f, 1.0f) * 255.0f);
++		return (unsigned char)(std::max(0.0f, std::min(1.0f, fade)) * 255.0f);
+ 	}
+ 
+ 	// Draws an element at an opacity, its own one kept
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index 11fd23ab..bd9b4e75 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -28,6 +28,7 @@
+ #include "guis/GuiMsgBox.h"
+ #include "utils/ThreadPool.h"
+ #include <SDL_timer.h>
++#include <algorithm>
+ #include "TextToSpeech.h"
+ #include "VolumeControl.h"
+ 
+@@ -368,9 +369,10 @@ void ViewController::goToGameList(SystemData* system, bool forceImmediate)
+ // over the first 35 % of the way, the coming one's from 30 to 70 %), as the theme's design does
+ static const int COLUMN_SLIDE_MS = 360;
+ 
++// (Math::clamp takes its bounds first in its definition, not as declared: not used here)
+ static float smoothStep(float a, float b, float t)
+ {
+-	float x = Math::clamp((t - a) / (b - a), 0.0f, 1.0f);
++	float x = std::max(0.0f, std::min(1.0f, (t - a) / (b - a)));
+ 	return x * x * (3.0f - 2.0f * x);
+ }
+ 

@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:06:10 +0000
+Subject: [PATCH] Let a theme cap a text's lines, ending the last with an
+ ellipsis
+
+A wrapped text could only grow or be cut by its box: a long title
+pushed the lines under it down, or ran into them, and a description
+stopped in the middle of a line at the box's edge. The text element's
+maxLines keeps at most that many lines; the last one ends with an
+ellipsis where the text goes on, and a text sized "w 0" is as tall as
+the lines it keeps, so the elements stacked under it follow.
+---
+ THEMES.md                                |  2 +
+ es-core/src/ThemeData.cpp                |  1 +
+ es-core/src/components/TextComponent.cpp | 58 ++++++++++++++++++++++--
+ es-core/src/components/TextComponent.h   |  6 +++
+ 4 files changed, 63 insertions(+), 4 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 298e8022..1f98a346 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1095,6 +1095,8 @@ Can be created as an extra.
+ 	- Valid values are "left", "center", or "right".  Controls alignment on the X axis.  "center" will also align vertically.
+ * `forceUppercase` - type: BOOLEAN.  Draw text in uppercase.
+ * `lineSpacing` - type: FLOAT.  Controls the space between lines (as a multiple of font height).  Default is 1.5.
++* `maxLines` - type: FLOAT.
++	- At most that many lines of a wrapped text: the last one ends with an ellipsis (…) where the text goes on, and a text sized `w 0` is as tall as the lines it keeps.  Default is 0 (every line).
+ * `visible` - type: BOOLEAN.
+     - If true, component will be rendered, otherwise rendering will be skipped.  Can be used to hide elements from a particular view.
+ * `zIndex` - type: FLOAT.
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index b0c36dd9..49be5398 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -294,6 +294,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "glowSize", FLOAT },
+ 		{ "glowOffset", NORMALIZED_PAIR },
+ 		{ "multiLine", STRING },				// auto, true, false
++		{ "maxLines", FLOAT },					// at most that many lines, the last one ending with an ellipsis (0: all)
+ 		{ "singleLineScroll", BOOLEAN },
+ 		{ "autoScroll", STRING },				// horizontal, vertical, none
+ 		{ "autoScrollDelay", FLOAT },
+diff --git a/es-core/src/components/TextComponent.cpp b/es-core/src/components/TextComponent.cpp
+index 5ba8920e..ff84b327 100644
+--- a/es-core/src/components/TextComponent.cpp
++++ b/es-core/src/components/TextComponent.cpp
+@@ -3,6 +3,7 @@
+ #include "utils/StringUtil.h"
+ #include "Log.h"
+ #include "Settings.h"
++#include <algorithm>
+ 
+ #define AUTO_SCROLL_RESET_DELAY 6000
+ #define AUTO_SCROLL_DELAY 6000 // ms to wait before we start to scroll
+@@ -13,7 +14,7 @@ TextComponent::TextComponent(Window* window) : GuiComponent(window),
+ 	mHorizontalAlignment(ALIGN_LEFT), mVerticalAlignment(ALIGN_CENTER), mLineSpacing(1.5f), mBgColor(0),
+ 	mRenderBackground(false), mGlowColor(0), mGlowSize(2), mGlowOffset(Vector2f(0,0)), mBindingDefaults(false), mAutoScrollDelay(AUTO_SCROLL_DELAY), mAutoScrollSpeed(AUTO_SCROLL_SPEED),
+ 	mReflection(0.0f, 0.0f), mReflectOnBorders(false), mAutoScroll(AutoScrollType::NONE), mTextLength(-1), mMultiline(MultiLineType::AUTO),
+-	mHasBonusColor(false), mBonusColor(0)
++	mHasBonusColor(false), mBonusColor(0), mMaxLines(0)
+ {	
+ 	mMarqueeOffset = 0;
+ 	mMarqueeOffset2 = 0;
+@@ -26,7 +27,7 @@ TextComponent::TextComponent(Window* window, const std::string& text, const std:
+ 	mHorizontalAlignment(align), mVerticalAlignment(ALIGN_CENTER), mLineSpacing(1.5f), mBgColor(0),
+ 	mRenderBackground(false), mGlowColor(0), mGlowSize(2), mGlowOffset(Vector2f(0, 0)), mBindingDefaults(false), mAutoScrollDelay(AUTO_SCROLL_DELAY), mAutoScrollSpeed(AUTO_SCROLL_SPEED),
+ 	mReflection(0.0f, 0.0f), mReflectOnBorders(false), mAutoScroll(AutoScrollType::NONE), mTextLength(-1), mMultiline(MultiLineType::AUTO),
+-	mHasBonusColor(false), mBonusColor(0)
++	mHasBonusColor(false), mBonusColor(0), mMaxLines(0)
+ {
+ 	setFont(font);
+ 	setColor(color);
+@@ -335,7 +336,7 @@ void TextComponent::onTextChanged()
+ 		if (mMultiline == MultiLineType::SINGLELINE)
+ 			mSize[1] = mFont->getHeight() + mPadding.y() + mPadding.w();
+ 		else
+-			mSize[1] = mFont->sizeWrappedText(mUppercase ? Utils::String::toUpper(mText) : mText, getSize().x(), mLineSpacing).y() + mPadding.y() + mPadding.w();
++			mSize[1] = mFont->sizeText(wrapLines(mUppercase ? Utils::String::toUpper(mText) : mText, getSize().x()), mLineSpacing).y() + mPadding.y() + mPadding.w();
+ 	}
+ }
+ 
+@@ -405,7 +406,7 @@ void TextComponent::buildTextCache()
+ 		mTextCache = std::shared_ptr<TextCache>(f->buildTextCache(text, Vector2f(0, 0), color, sx, mHorizontalAlignment, mLineSpacing));
+ 	}
+ 	else
+-		mTextCache = std::shared_ptr<TextCache>(f->buildTextCache(f->wrapText(text, sx), Vector2f(0, 0), color, sx, mHorizontalAlignment, mLineSpacing));
++		mTextCache = std::shared_ptr<TextCache>(f->buildTextCache(wrapLines(text, sx), Vector2f(0, 0), color, sx, mHorizontalAlignment, mLineSpacing));
+ }
+ 
+ void TextComponent::update(int deltaTime)
+@@ -679,6 +680,8 @@ void TextComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, const st
+ 				setMultiLine(MultiLineType::AUTO);
+ 		}
+ 
++		setMaxLines(elem->has("maxLines") ? std::max(0, (int)elem->get<float>("maxLines")) : 0);
++
+ 		if (elem->has("autoScrollDelay"))
+ 			mAutoScrollDelay = (int) Math::clamp(elem->get<float>("autoScrollDelay"), 0, 1000000);
+ 
+@@ -724,6 +727,53 @@ void TextComponent::setAutoScroll(AutoScrollType value)
+ 	onSizeChanged();	
+ }
+ 
++// The text wrapped at a width; with a line cap, its first lines only, the last one ending with an ellipsis where
++// the text goes on
++std::string TextComponent::wrapLines(const std::string& text, float width)
++{
++	std::string wrapped = mFont->wrapText(text, width);
++	if (mMaxLines <= 0)
++		return wrapped;
++
++	size_t start = 0;
++	for (int line = 1; line < mMaxLines; line++)
++	{
++		start = wrapped.find('\n', start);
++		if (start == std::string::npos)
++			return wrapped;
++
++		start++;
++	}
++
++	size_t end = wrapped.find('\n', start);
++	if (end == std::string::npos)
++		return wrapped;
++
++	const std::string ellipsis = "\xE2\x80\xA6";
++	auto withEllipsis = [](std::string line, const std::string& end)
++	{
++		while (!line.empty() && (line.back() == ' ' || line.back() == ',' || line.back() == ';' || line.back() == ':'))
++			line.pop_back();
++
++		return line + end;
++	};
++
++	std::string last = wrapped.substr(start, end - start);
++	while (!last.empty() && mFont->sizeText(withEllipsis(last, ellipsis)).x() > width)
++		last = last.substr(0, Utils::String::prevCursor(last, last.size()));
++
++	return wrapped.substr(0, start) + withEllipsis(last, ellipsis);
++}
++
++void TextComponent::setMaxLines(int lines)
++{
++	if (mMaxLines == lines)
++		return;
++
++	mMaxLines = lines;
++	onTextChanged();
++}
++
+ void TextComponent::setMultiLine(MultiLineType value)
+ {
+ 	if (mMultiline == value)
+diff --git a/es-core/src/components/TextComponent.h b/es-core/src/components/TextComponent.h
+index b52aa8bc..2d5d6e63 100644
+--- a/es-core/src/components/TextComponent.h
++++ b/es-core/src/components/TextComponent.h
+@@ -82,12 +82,17 @@ public:
+ 	MultiLineType getMultiLine() { return mMultiline; }
+ 	void setMultiLine(MultiLineType value);
+ 
++	// At most that many lines of a wrapped text, the last one ending with an ellipsis where the text goes on (0: all)
++	int getMaxLines() { return mMaxLines; }
++	void setMaxLines(int lines);
++
+ 	bool getBindingDefaults() { return mBindingDefaults; }
+ 
+ 	void setBonusTextColor(unsigned int color);
+ 
+ protected:
+ 	void buildTextCache();
++	std::string wrapLines(const std::string& text, float width);
+ 	virtual void onTextChanged();
+ 
+ 	std::string mText;
+@@ -134,6 +139,7 @@ private:
+ 
+ 	AutoScrollType mAutoScroll;
+ 	MultiLineType  mMultiline;
++	int            mMaxLines;
+ };
+ 
+ #endif // ES_CORE_COMPONENTS_TEXT_COMPONENT_H

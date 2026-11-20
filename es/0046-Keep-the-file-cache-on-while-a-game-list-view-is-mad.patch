@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:25:14 +0000
+Subject: [PATCH] Keep the file cache on while a game list view is made
+
+- The cache's activator sat inside the block that returns a view made
+  before, so it ended before the new view was made and cached nothing. It
+  now lasts until the view is made, as its comment says.
+---
+ es-app/src/views/ViewController.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index a5904d62..eade1b11 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -680,10 +680,14 @@ std::shared_ptr<IGameListView> ViewController::getGameListView(SystemData* syste
+ 
+ 		if (!loadIfnull)
+ 			return nullptr;
++	}
+ 
+-		// The view's elements and its games' media check the same files again and again: once each
+-		Utils::FileSystem::FileSystemCacheActivator fsc;
++	// The view's elements and its games' media check the same files again and again: once each, while the
++	// view is made
++	Utils::FileSystem::FileSystemCacheActivator fsc;
+ 
++	if (createAsPopupAndSetExitFunction == nullptr)
++	{
+ 		system->setUIModeFilters();
+ 		system->updateDisplayedGameCount();
+ 	}

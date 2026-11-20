@@ -1,0 +1,341 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 17:17:16 +0000
+Subject: [PATCH] Show a brightness popup next to the volume one
+
+Brightness hotkeys (knulli-brightness + 5 / - 5) give no feedback in the
+menus, unlike volume.
+
+Add BrightnessInfoComponent: the volume popup (same frame, bar, label and
+timing) placed right of it, reading the backlight every 40 ms from
+/sys/class/backlight, or from the Allwinner display driver (/dev/disp,
+DISP_LCD_GET_BRIGHTNESS) where there is no backlight class, as
+/usr/bin/brightness does. It follows the "show overlay when volume
+changes" setting.
+
+Only user changes show it. The level found at start is taken silently,
+like the volume, and so are changes while knulli-brightness keeps
+/var/run/knulli-brightness (battery saver dim or display off, and their
+restore), for 1.5 s after it, and after a gap of more than 1 s between
+two reads (ES stopped by the battery saver, suspend, a game running).
+
+VolumeInfoComponent gets readLevel(), showChange() and moveToSlot() for
+this; the volume popup behaves as before.
+---
+ es-core/CMakeLists.txt                        |   2 +
+ es-core/src/Window.cpp                        |  13 ++
+ es-core/src/Window.h                          |   1 +
+ .../components/BrightnessInfoComponent.cpp    | 121 ++++++++++++++++++
+ .../src/components/BrightnessInfoComponent.h  |  28 ++++
+ .../src/components/VolumeInfoComponent.cpp    |  16 ++-
+ es-core/src/components/VolumeInfoComponent.h  |   8 ++
+ 7 files changed, 186 insertions(+), 3 deletions(-)
+ create mode 100644 es-core/src/components/BrightnessInfoComponent.cpp
+ create mode 100644 es-core/src/components/BrightnessInfoComponent.h
+
+diff --git a/es-core/CMakeLists.txt b/es-core/CMakeLists.txt
+index 33c111f2..a0a01773 100644
+--- a/es-core/CMakeLists.txt
++++ b/es-core/CMakeLists.txt
+@@ -80,6 +80,7 @@ set(CORE_HEADERS
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoPlayerComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoVlcComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VolumeInfoComponent.h
++	${CMAKE_CURRENT_SOURCE_DIR}/src/components/BrightnessInfoComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/MultiLineMenuEntry.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ScrollbarComponent.h	
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ComponentTab.h
+@@ -215,6 +216,7 @@ set(CORE_SOURCES
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoPlayerComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VideoVlcComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/VolumeInfoComponent.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/components/BrightnessInfoComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ScrollbarComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/MultiLineMenuEntry.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ComponentTab.cpp
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index f0521a29..0923d442 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -22,6 +22,7 @@
+ #include "components/BatteryIndicatorComponent.h"
+ #include "guis/GuiMsgBox.h"
+ #include "components/VolumeInfoComponent.h"
++#include "components/BrightnessInfoComponent.h"
+ #include "Splash.h"
+ #include "PowerSaver.h"
+ #include "renderers/Renderer.h"
+@@ -162,6 +163,11 @@ bool Window::init(bool initRenderer, bool initInputManager)
+ 	else
+ 		mVolumeInfo->reset();
+ 
++	if (mBrightnessInfo == nullptr)
++		mBrightnessInfo = std::make_shared<BrightnessInfoComponent>(this);
++	else
++		mBrightnessInfo->reset();
++
+ 	// update our help because font sizes probably changed
+ 	if (peekGui())
+ 		peekGui()->updateHelpPrompts();
+@@ -455,6 +461,9 @@ void Window::update(int deltaTime)
+ 	if (mVolumeInfo)
+ 		mVolumeInfo->update(deltaTime);
+ 
++	if (mBrightnessInfo)
++		mBrightnessInfo->update(deltaTime);
++
+ 	mFrameTimeElapsed += deltaTime;
+ 	mFrameCountElapsed++;
+ 	if (mFrameTimeElapsed > 500)
+@@ -774,6 +783,9 @@ void Window::render()
+ 	if (mVolumeInfo && Settings::VolumePopup())
+ 		mVolumeInfo->render(transform);
+ 
++	if (mBrightnessInfo && Settings::VolumePopup())
++		mBrightnessInfo->render(transform);
++
+ 	if (mTimeSinceLastInput >= screensaverTime && screensaverTime != 0)
+ 	{
+ 		if (mAllowSleep && (!mScreenSaver || mScreenSaver->allowSleep()))
+@@ -1304,6 +1316,7 @@ void Window::onThemeChanged(const std::shared_ptr<ThemeData>& theme)
+ 		mBatteryIndicator->applyTheme(theme, "screen", "batteryIndicator", ThemeFlags::ALL);
+ 	
+ 	mVolumeInfo = std::make_shared<VolumeInfoComponent>(this);
++	mBrightnessInfo = std::make_shared<BrightnessInfoComponent>(this);
+ }
+ 
+ void Window::setGunCalibrationState(bool isCalibrating)
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index f782efac..59271580 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -161,6 +161,7 @@ private:
+ 	std::shared_ptr<TextComponent>	mClock;
+ 	std::shared_ptr<ControllerActivityComponent>	mControllerActivity;
+ 	std::shared_ptr<VolumeInfoComponent> mVolumeInfo;
++	std::shared_ptr<VolumeInfoComponent> mBrightnessInfo;
+ 	std::shared_ptr<BatteryIndicatorComponent>	mBatteryIndicator;	
+ 
+ 	float mNotificationOffsetY = 0.02f;
+diff --git a/es-core/src/components/BrightnessInfoComponent.cpp b/es-core/src/components/BrightnessInfoComponent.cpp
+new file mode 100644
+index 00000000..ce34dbd4
+--- /dev/null
++++ b/es-core/src/components/BrightnessInfoComponent.cpp
+@@ -0,0 +1,121 @@
++#include "BrightnessInfoComponent.h"
++#include "math/Misc.h"
++#include "utils/FileSystemUtil.h"
++#include "utils/StringUtil.h"
++#include <SDL_timer.h>
++
++#ifndef WIN32
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <time.h>
++#include <unistd.h>
++#endif
++
++// knulli-brightness keeps the user's level in this file while "dim" or "dispoff"
++// is in effect, and removes it once "undim" or "dispon" has restored the level
++#define DIMMED_MARKER		"/var/run/knulli-brightness"
++
++// Changes are taken silently while dimmed, during this time after it, and after a gap
++// between two reads (ES stopped by the battery saver, system suspended, game running)
++#define QUIET_TIME			1500
++#define MAX_READ_GAP		1000
++
++// sunxi display driver, as used by /usr/bin/brightness (levels 0-255)
++#define SUNXI_DISP_DEVICE			"/dev/disp"
++#define DISP_LCD_GET_BRIGHTNESS		0x103
++#define SUNXI_MAX_BRIGHTNESS		255
++
++static int64_t clockMs()
++{
++#ifdef WIN32
++	return SDL_GetTicks();
++#else
++	// Unlike SDL_GetTicks, CLOCK_BOOTTIME keeps counting while the system is suspended
++	struct timespec ts;
++	clock_gettime(CLOCK_BOOTTIME, &ts);
++	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++#endif
++}
++
++BrightnessInfoComponent::BrightnessInfoComponent(Window* window)
++	: VolumeInfoComponent(window), mDispFd(-1), mMaxBrightness(0), mLastLevel(-1), mLastReadTime(0), mQuietUntil(0)
++{
++	moveToSlot(1);
++
++#ifndef WIN32
++	for (auto dir : Utils::FileSystem::getDirContent("/sys/class/backlight"))
++	{
++		std::string brightnessPath = dir + "/brightness";
++		std::string maxBrightnessPath = dir + "/max_brightness";
++
++		if (access(brightnessPath.c_str(), R_OK) != 0 || access(maxBrightnessPath.c_str(), R_OK) != 0)
++			continue;
++
++		int maxBrightness = Utils::String::toInteger(Utils::FileSystem::readAllText(maxBrightnessPath));
++		if (maxBrightness <= 0)
++			continue;
++
++		mBrightnessPath = brightnessPath;
++		mMaxBrightness = maxBrightness;
++		break;
++	}
++
++	if (mBrightnessPath.empty())
++	{
++		mDispFd = open(SUNXI_DISP_DEVICE, O_RDWR | O_CLOEXEC);
++		if (mDispFd >= 0)
++			mMaxBrightness = SUNXI_MAX_BRIGHTNESS;
++	}
++#endif
++}
++
++BrightnessInfoComponent::~BrightnessInfoComponent()
++{
++#ifndef WIN32
++	if (mDispFd >= 0)
++		close(mDispFd);
++#endif
++}
++
++int BrightnessInfoComponent::readLevel()
++{
++	if (mBrightnessPath.empty() && mDispFd < 0)
++		return -1;
++
++	int64_t now = clockMs();
++
++#ifndef WIN32
++	if (access(DIMMED_MARKER, F_OK) == 0)
++		mQuietUntil = now + QUIET_TIME;
++#endif
++
++	if (mLastReadTime != 0 && now - mLastReadTime > MAX_READ_GAP)
++		mQuietUntil = now + QUIET_TIME;
++
++	mLastReadTime = now;
++
++	int value = 0;
++	if (!mBrightnessPath.empty())
++		value = Utils::String::toInteger(Utils::FileSystem::readAllText(mBrightnessPath));
++#ifndef WIN32
++	else
++	{
++		unsigned long args[3] = { 0, 0, 0 }; // screen 0
++		value = ioctl(mDispFd, DISP_LCD_GET_BRIGHTNESS, args);
++		if (value < 0)
++			return mLastLevel; // keep the last level on a failed read
++	}
++#endif
++
++	if (value < 0)
++		value = 0;
++
++	// Same rounding as knulli-brightness
++	mLastLevel = Math::min(100, (value * 100 + mMaxBrightness / 2) / mMaxBrightness);
++	return mLastLevel;
++}
++
++bool BrightnessInfoComponent::showChange()
++{
++	return clockMs() >= mQuietUntil;
++}
+diff --git a/es-core/src/components/BrightnessInfoComponent.h b/es-core/src/components/BrightnessInfoComponent.h
+new file mode 100644
+index 00000000..ba3af72c
+--- /dev/null
++++ b/es-core/src/components/BrightnessInfoComponent.h
+@@ -0,0 +1,28 @@
++#pragma once
++
++#include "components/VolumeInfoComponent.h"
++#include <cstdint>
++
++// The volume popup, next to it, for the screen backlight: /sys/class/backlight, or the
++// Allwinner display driver (/dev/disp) on boards without it, like knulli-brightness.
++// Only changes made by the user show it: not the level found at start, and not
++// the battery saver dimming or turning off the screen, or restoring it.
++class BrightnessInfoComponent : public VolumeInfoComponent
++{
++public:
++	BrightnessInfoComponent(Window* window);
++	~BrightnessInfoComponent();
++
++protected:
++	int readLevel() override;
++	bool showChange() override;
++
++private:
++	std::string mBrightnessPath;
++	int mDispFd;
++	int mMaxBrightness;
++	int mLastLevel;
++
++	int64_t mLastReadTime;
++	int64_t mQuietUntil;
++};
+diff --git a/es-core/src/components/VolumeInfoComponent.cpp b/es-core/src/components/VolumeInfoComponent.cpp
+index f2fcea45..1acd2e56 100644
+--- a/es-core/src/components/VolumeInfoComponent.cpp
++++ b/es-core/src/components/VolumeInfoComponent.cpp
+@@ -103,13 +103,23 @@ VolumeInfoComponent::VolumeInfoComponent(Window* window, bool actionLine)
+ 	mLabel->setSize(fullSize.x(), h);
+ 	addChild(mLabel);
+ 
++	moveToSlot(0);
++}
++
++void VolumeInfoComponent::moveToSlot(int slot)
++{
+ 	// FCA TopLeft
+-	float posX = Renderer::getScreenWidth() * 0.02f;
++	float posX = Renderer::getScreenWidth() * 0.02f + slot * (mSize.x() + Renderer::getScreenWidth() * 0.01f);
+ 	float posY = Renderer::getScreenHeight() * 0.04f;
+ 
+ 	setPosition(posX, posY, 0);
+ }
+ 
++int VolumeInfoComponent::readLevel()
++{
++	return VolumeControl::getInstance()->getVolume();
++}
++
+ VolumeInfoComponent::~VolumeInfoComponent()
+ {
+ 	delete mLabel;
+@@ -141,10 +151,10 @@ void VolumeInfoComponent::update(int deltaTime)
+ 
+ 	mCheckTime = 0;
+ 
+-	int volume = VolumeControl::getInstance()->getVolume();
++	int volume = readLevel();
+ 	if (volume != mVolume)
+ 	{
+-		bool firstTime = (mVolume < 0);
++		bool firstTime = (mVolume < 0) || !showChange();
+ 
+ 		mVolume = volume;
+ 
+diff --git a/es-core/src/components/VolumeInfoComponent.h b/es-core/src/components/VolumeInfoComponent.h
+index 292b644c..320abef2 100644
+--- a/es-core/src/components/VolumeInfoComponent.h
++++ b/es-core/src/components/VolumeInfoComponent.h
+@@ -19,6 +19,14 @@ public:
+ 
+ 	void reset() { mVolume = -1; }
+ 
++protected:
++	// Level shown by the popup, in percent, or -1 when there is none
++	virtual int readLevel();
++	// False to take a new level without showing the popup
++	virtual bool showChange() { return true; }
++	// Horizontal place of the popup: 0 is the top left corner, 1 is next to it
++	void moveToSlot(int slot);
++
+ private:
+ 	NinePatchComponent* mFrame;
+ 	TextComponent*		mLabel;

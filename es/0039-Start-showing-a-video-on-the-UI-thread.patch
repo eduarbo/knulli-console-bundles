@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:07:00 +0000
+Subject: [PATCH] Start showing a video on the UI thread
+
+- VLC's display callback marked the video started itself: on VLC's thread
+  it resized the component and rasterized its texture, while the UI thread
+  could be freeing that texture. The callback now only sets a flag; the
+  component's update and render take it.
+---
+ es-core/src/components/VideoVlcComponent.cpp | 31 ++++++++++----------
+ es-core/src/components/VideoVlcComponent.h   | 10 ++++---
+ 2 files changed, 22 insertions(+), 19 deletions(-)
+
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 01ed5381..267212e4 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -65,16 +65,14 @@ static void unlock(void *data, void* /*id*/, void *const* /*p_pixels*/)
+ 	c->mutexes[frame].unlock();
+ }
+ 
+-// VLC wants to display a video frame.
++// VLC wants to display a video frame. This runs on VLC's thread: it only tells the UI thread
++// (VideoVlcComponent::checkDisplayed), which may be freeing the component's texture.
+ static void display(void* data, void* id)
+ {
+ 	if (data == NULL)
+ 		return;
+ 
+-	struct VideoContext *c = (struct VideoContext *)data;
+-	std::unique_lock<std::mutex> component(c->componentLock);
+-	if (c->valid && c->component != NULL && !c->component->isPlaying() && c->component->isWaitingForVideoToStart())
+-		c->component->onVideoStarted();
++	((struct VideoContext *)data)->displayed = true;
+ }
+ 
+ // The players start and stop on one worker thread: making a VLC player opens its audio output (ALSA reads its
+@@ -737,8 +735,7 @@ void VideoVlcComponent::setupContext()
+ 	mContext = std::make_shared<VideoContext>();
+ 	mContext->surfaces[0] = new unsigned char[mVideoWidth * mVideoHeight * 4];
+ 	mContext->surfaces[1] = new unsigned char[mVideoWidth * mVideoHeight * 4];
+-	mContext->component = this;
+-	mContext->valid = true;	
++	mContext->valid = true;
+ 	resize();	
+ }
+ 
+@@ -753,13 +750,8 @@ void VideoVlcComponent::freeContext()
+ 		mTexture = nullptr;
+ 	}
+ 
+-	// The player may still draw into its buffers until the worker stopped it: only the link to this goes
+-	{
+-		std::unique_lock<std::mutex> lock(mContext->componentLock);
+-		mContext->component = NULL;
+-		mContext->valid = false;
+-	}
+-
++	// The player may still draw into its buffers until the worker stopped it: they go with the last of them
++	mContext->valid = false;
+ 	mContext = nullptr;
+ }
+ 
+@@ -848,10 +840,18 @@ void VideoVlcComponent::init()
+ 	delete[] theArgs;
+ }
+ 
++// The first frame VLC displayed: the video shows from now on
++void VideoVlcComponent::checkDisplayed()
++{
++	if (mContext != nullptr && mContext->valid && mContext->displayed && !mIsPlaying && mIsWaitingForVideoToStart)
++		onVideoStarted();
++}
++
+ void VideoVlcComponent::handleLooping()
+ {
+ 	checkParse();
+ 	checkStart();
++	checkDisplayed();
+ 
+ 	if (mIsPlaying && mMediaPlayer)
+ 	{
+@@ -1262,7 +1262,8 @@ void VideoVlcComponent::update(int deltaTime)
+ 	if (mConfig.showSnapshotNoVideo || mConfig.showSnapshotDelay)
+ 		mStaticImage.update(deltaTime);
+ 
+-	VideoComponent::update(deltaTime);	
++	checkDisplayed();
++	VideoComponent::update(deltaTime);
+ }
+ 
+ void VideoVlcComponent::onShow()
+diff --git a/es-core/src/components/VideoVlcComponent.h b/es-core/src/components/VideoVlcComponent.h
+index f9bcce32..6979005f 100644
+--- a/es-core/src/components/VideoVlcComponent.h
++++ b/es-core/src/components/VideoVlcComponent.h
+@@ -5,6 +5,7 @@
+ #include "VideoComponent.h"
+ #include "ThemeData.h"
+ #include "renderers/Renderer.h"
++#include <atomic>
+ #include <mutex>
+ 
+ struct libvlc_instance_t;
+@@ -19,8 +20,8 @@ struct VideoContext
+ 	{
+ 		surfaces[0] = nullptr;
+ 		surfaces[1] = nullptr;
+-		component = nullptr;
+ 		valid = false;
++		displayed = false;
+ 		hasFrame[0] = false;
+ 		hasFrame[1] = false;
+ 		surfaceId = 0;
+@@ -37,9 +38,9 @@ struct VideoContext
+ 	std::mutex			mutexes[2];
+ 	bool				hasFrame[2];
+ 
+-	std::mutex			componentLock;	// component and valid, read by VLC's display callback
+-	VideoComponent*		component;
+-	bool				valid;	
++	bool				valid;
++	// Set by VLC's display callback; the UI thread starts showing the video (VideoVlcComponent::checkDisplayed)
++	std::atomic<bool>	displayed;
+ };
+ 
+ struct PlayerStart;
+@@ -145,6 +146,7 @@ private:
+ 	void checkParse();
+ 	void startPlayback(const Probe& probe);
+ 	void checkStart();
++	void checkDisplayed();
+ 	static bool findProbe(const std::string& path, Probe& probe);
+ 	static void keepProbe(const std::string& path, const Probe& probe);
+ 

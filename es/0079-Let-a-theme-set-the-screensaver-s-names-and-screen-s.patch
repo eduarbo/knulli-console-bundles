@@ -1,0 +1,348 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:52:23 +0000
+Subject: [PATCH] Let a theme set the screensaver's names and screen shapes
+
+The slideshow and video screensavers fitted every picture at its own
+shape, so a TV game's 256x224 capture showed at 8:7 with black sides
+while the rest of the interface showed TV systems at 4:3. Their names
+were the system's full name in grey with a hard outline and no scrim,
+and the game's name gave way to its marquee.
+
+A menuScreenSaver element gives the game's and the system's names a
+font and colour each, a scrim under them, names for systems instead
+of their full names, and the systems whose pictures and videos take
+the screen's 4:3 (3:4 upright). The game's name is then text, left
+at the menus' row margin. Without the element nothing changes.
+---
+ THEMES.md                        |  28 +++++++++
+ es-app/src/SystemScreenSaver.cpp | 102 ++++++++++++++++++++++++++++++-
+ es-app/src/SystemScreenSaver.h   |   4 ++
+ es-core/src/ThemeData.cpp        |  47 ++++++++++++++
+ es-core/src/ThemeData.h          |  16 +++++
+ 5 files changed, 195 insertions(+), 2 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index dd6241de..3e122e99 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -838,6 +838,8 @@ ES versions with slides support the feature `slideshow`.
+ 	- The text field of the on-screen keyboard and other text popups
+ * `menuPrompt name="menuprompt"` - PATH | FONTPATH | FONTSIZE | COLOR
+ 	- The back prompt right of a menu's title, instead of a BACK button
++* `menuScreenSaver name="menuscreensaver"` - FONTPATH | FONTSIZE | COLOR | SYSTEMFONTPATH | SYSTEMFONTSIZE | SYSTEMCOLOR | SCRIMPATH | SCRIMHEIGHT | SCREENSYSTEMS | SYSTEMNAMES
++	- The screensaver's names and pictures
+ * `menuTile name="menutile"` - PATH | SELECTEDPATH | CORNERSIZE
+ 	- The tiles of a menu's image grid (the save states)
+ * `menuKeyboard name="menukeyboard"` - PATH | FOCUSEDPATH | ACTIVEPATH | CORNERSIZE | SPACING | FONTPATH | FONTSIZE | COLOR | SELECTEDCOLOR | WORDKEYS | FOCUSKEYS
+@@ -1551,6 +1553,32 @@ the image and BACK in the catalogue, written with a first capital. Without `path
+ * `color` - type: COLOR.
+   - Default: `menutextsmall`'s colour.
+ 
++#### menuScreenSaver
++
++The screensaver's names and pictures (`menuScreenSaver name="menuscreensaver"`). With it the slideshow and video
++screensavers show the game's name as text (not its marquee) and the system's name under it, left aligned at the
++menus' row margin, without an outline, over the scrim. Without it the screensaver is unchanged.
++
++* `fontPath` - type: PATH.
++* `fontSize` - type: FLOAT.
++  - The game's name. Default: `menutext`'s font.
++* `color` - type: COLOR.
++  - Default is FFFFFFFF.
++* `systemFontPath` - type: PATH.
++* `systemFontSize` - type: FLOAT.
++  - The system's name. Default: `menutextsmall`'s font.
++* `systemColor` - type: COLOR.
++  - Default is D0D0D0FF.
++* `scrimPath` - type: PATH.
++  - An image stretched across the screen's bottom under both names.
++* `scrimHeight` - type: FLOAT.
++  - The scrim's height, as a fraction of the screen height. Default: both names and a margin.
++* `screenSystems` - type: STRING.
++  - Systems (names, separated by spaces) whose pictures and videos take the screen's shape, at 4:3 (3:4 for one
++    taller than wide), as a TV showed them, instead of their own.
++* `systemNames` - type: STRING.
++  - Names for systems instead of their full names: `snes=Super Nintendo;nes=Nintendo NES`.
++
+ #### menuTile
+ 
+ The tiles of a menu's image grid, the save states' (`menuTile name="menutile"`). Without `path` and `selectedPath`
+diff --git a/es-app/src/SystemScreenSaver.cpp b/es-app/src/SystemScreenSaver.cpp
+index f64e5a34..73aefac7 100644
+--- a/es-app/src/SystemScreenSaver.cpp
++++ b/es-app/src/SystemScreenSaver.cpp
+@@ -526,6 +526,8 @@ GameScreenSaverBase::GameScreenSaverBase(Window* window) : GuiComponent(window),
+ 	mViewport(0, 0, Renderer::getScreenWidth(), Renderer::getScreenHeight())
+ {
+ 	mDecoration = nullptr;
++	mScrim = nullptr;
++	mScreenShape = false;
+ 	mMarquee = nullptr;
+ 	mLabelGame = nullptr;
+ 	mLabelSystem = nullptr;
+@@ -578,6 +580,12 @@ GameScreenSaverBase::~GameScreenSaverBase()
+ 		mDecoration = nullptr;
+ 	}
+ 
++	if (mScrim != nullptr)
++	{
++		delete mScrim;
++		mScrim = nullptr;
++	}
++
+ 	if (mLabelGame != nullptr)
+ 	{
+ 		delete mLabelGame;
+@@ -610,6 +618,20 @@ GameScreenSaverBase::~GameScreenSaverBase()
+ 
+ void GameScreenSaverBase::setGame(FileData* game)
+ {	
++	if (mScrim != nullptr)
++	{
++		delete mScrim;
++		mScrim = nullptr;
++	}
++
++	auto& theme = ThemeData::getMenuTheme()->ScreenSaver;
++	mScreenShape = false;
++	if (theme.themed && game != nullptr)
++	{
++		auto system = game->getSourceFileData()->getSystem()->getName();
++		mScreenShape = std::find(theme.screenSystems.cbegin(), theme.screenSystems.cend(), system) != theme.screenSystems.cend();
++	}
++
+ 	if (mLabelGame != nullptr)
+ 	{
+ 		delete mLabelGame;
+@@ -770,6 +792,66 @@ void GameScreenSaverBase::setGame(FileData* game)
+ 	mLabelSystem->setGlowSize(2);
+ 	mLabelSystem->setFont(ph, sz * 0.66);
+ 	mLabelSystem->setText(game->getSystem()->getFullName());
++
++	if (!theme.themed)
++		return;
++
++	// The theme's names (menuScreenSaver): the game's name as text, not its marquee, over the theme's scrim at the
++	// screen's bottom, left at the menus' margin and without an outline; the system as the theme names it
++	if (mMarquee != nullptr)
++	{
++		delete mMarquee;
++		mMarquee = nullptr;
++	}
++
++	float margin = ThemeData::getMenuTheme()->Row.padding;
++	float bottom = mViewport.y + mViewport.h;
++	float gameHeight = theme.font->getHeight();
++	float systemHeight = theme.systemFont->getHeight();
++	float scrimHeight = theme.scrimHeight > 0 ? theme.scrimHeight : gameHeight + systemHeight + 2 * margin;
++
++	if (!theme.scrimPath.empty())
++	{
++		mScrim = new ImageComponent(mWindow, true);
++		mScrim->setImage(theme.scrimPath);
++		mScrim->setResize(mViewport.w, scrimHeight);
++		mScrim->setPosition(mViewport.x, bottom - scrimHeight);
++	}
++
++	// The two lines in the scrim's lower part: under them as much space as on the scrim's sides
++	float systemTop = Math::round(bottom - margin * 0.6f - systemHeight);
++	float gameTop = systemTop - gameHeight;
++
++	auto system = game->getSourceFileData()->getSystem();
++	auto name = theme.systemNames.find(system->getName());
++
++	for (auto label : { mLabelGame, mLabelSystem })
++	{
++		label->setHorizontalAlignment(EsLocale::isRTL() ? ALIGN_RIGHT : ALIGN_LEFT);
++		label->setVerticalAlignment(ALIGN_CENTER);
++		label->setGlowSize(0);
++		label->setMultiLine(TextComponent::MultiLineType::SINGLELINE);
++	}
++
++	mLabelGame->setFont(theme.font);
++	mLabelGame->setColor(theme.color);
++	mLabelGame->setPosition(mViewport.x + margin, gameTop);
++	mLabelGame->setSize(mViewport.w - 2 * margin, gameHeight);
++
++	mLabelSystem->setFont(theme.systemFont);
++	mLabelSystem->setColor(theme.systemColor);
++	mLabelSystem->setText(name != theme.systemNames.cend() ? name->second : system->getFullName());
++	mLabelSystem->setPosition(mViewport.x + margin, systemTop);
++	mLabelSystem->setSize(mViewport.w - 2 * margin, systemHeight);
++}
++
++void GameScreenSaverBase::renderScrim(const Transform4x4f& transform, unsigned char opacity)
++{
++	if (mScrim == nullptr || mLabelGame == nullptr)
++		return;
++
++	mScrim->setOpacity(opacity);
++	mScrim->render(transform);
+ }
+ 
+ void GameScreenSaverBase::applyBezelInfo(const std::string& infoFile)
+@@ -817,6 +899,8 @@ void GameScreenSaverBase::applyBezelInfo(const std::string& infoFile)
+ 
+ void GameScreenSaverBase::render(const Transform4x4f& transform)
+ {
++	renderScrim(transform, mOpacity);
++
+ 	if (mMarquee)
+ 	{
+ 		mMarquee->setOpacity(mOpacity);
+@@ -933,7 +1017,13 @@ void ImageScreenSaver::setImage(const std::string path)
+ 		mImage->setOrigin(0.5f, 0.5f);
+ 		mImage->setPosition(mViewport.x + mViewport.w / 2.0f, mViewport.y + mViewport.h / 2.0f);
+ 
+-		if (Settings::getInstance()->getBool("SlideshowScreenSaverStretch"))
++		// A system the theme shows at its screen's shape: the picture fills the screen at 4:3 (3:4 when upright)
++		if (mScreenShape)
++		{
++			mImage->setKeepOrientation(true);
++			mImage->setResize((float)mViewport.w, (float)mViewport.h);
++		}
++		else if (Settings::getInstance()->getBool("SlideshowScreenSaverStretch"))
+ 			mImage->setMinSize((float)mViewport.w, (float)mViewport.h);
+ 		else
+ 			mImage->setMaxSize((float)mViewport.w, (float)mViewport.h);
+@@ -997,7 +1087,12 @@ void VideoScreenSaver::setVideo(const std::string path)
+ 		
+ 		mVideo->setPosition(mViewport.x + mViewport.w / 2.0f, mViewport.y + mViewport.h / 2.0f);
+ 
+-		if (Settings::getInstance()->getBool("StretchVideoOnScreenSaver"))
++		if (mScreenShape)
++		{
++			mVideo->setKeepOrientation(true);
++			mVideo->setResize((float)mViewport.w, (float)mViewport.h);
++		}
++		else if (Settings::getInstance()->getBool("StretchVideoOnScreenSaver"))
+ 			mVideo->setMinSize((float)mViewport.w, (float)mViewport.h);
+ 		else
+ 			mVideo->setMaxSize((float)mViewport.w, (float)mViewport.h);
+@@ -1043,6 +1138,9 @@ void VideoScreenSaver::render(const Transform4x4f& transform)
+ 
+ 	if (Settings::getInstance()->getString("ScreenSaverGameInfo") != "never")
+ 	{
++		if (mFade != 0)
++			renderScrim(transform, mOpacity * mFade);
++
+ 		if (mMarquee && mFade != 0)
+ 		{
+ 			mMarquee->setOpacity(mOpacity * mFade);
+diff --git a/es-app/src/SystemScreenSaver.h b/es-app/src/SystemScreenSaver.h
+index 4075cf2e..e8a7808a 100644
+--- a/es-app/src/SystemScreenSaver.h
++++ b/es-app/src/SystemScreenSaver.h
+@@ -32,8 +32,12 @@ protected:
+ 	TextComponent*		mLabelTime;
+ 
+ 	ImageComponent*		mDecoration;
++	ImageComponent*		mScrim;
+ 
+ 	Renderer::Rect		mViewport;
++	bool				mScreenShape;	// the theme shows this game's system at its screen's shape
++
++	void renderScrim(const Transform4x4f& transform, unsigned char opacity);
+ 
+ 	int 				mDateTimeUpdateAccumulator;
+ 	time_t				mDateTimeLastUpdate;
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 15ec3942..e395d02a 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -697,6 +697,17 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "fontPath", PATH },
+ 		{ "fontSize", FLOAT },
+ 		{ "color", COLOR } } },
++	{ "menuScreenSaver",{
++		{ "fontPath", PATH },
++		{ "fontSize", FLOAT },
++		{ "color", COLOR },
++		{ "systemFontPath", PATH },
++		{ "systemFontSize", FLOAT },
++		{ "systemColor", COLOR },
++		{ "scrimPath", PATH },
++		{ "scrimHeight", FLOAT },
++		{ "screenSystems", STRING },
++		{ "systemNames", STRING } } },
+ 	{ "menuTile",{
+ 		{ "path", PATH },
+ 		{ "selectedPath", PATH },
+@@ -2566,6 +2577,42 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			TextEdit.caretColor = elem->get<unsigned int>("caretColor");
+ 	}
+ 
++	elem = theme->getElement("menu", "menuscreensaver", "menuScreenSaver");
++	if (elem)
++	{
++		float sh = (float)Math::min(Renderer::getScreenHeight(), Renderer::getScreenWidth());
++
++		ScreenSaver.themed = true;
++		ScreenSaver.font = (elem->has("fontPath") || elem->has("fontSize")) ? Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_MEDIUM), true) : Text.font;
++		if (elem->has("color"))
++			ScreenSaver.color = elem->get<unsigned int>("color");
++
++		std::string systemPath = elem->has("systemFontPath") ? elem->get<std::string>("systemFontPath") : ScreenSaver.font->getPath();
++		int systemSize = elem->has("systemFontSize") ? (int)(sh * elem->get<float>("systemFontSize")) : 0;
++		ScreenSaver.systemFont = systemSize > 0 ? Font::get(systemSize, systemPath, true) : TextSmall.font;
++		if (elem->has("systemColor"))
++			ScreenSaver.systemColor = elem->get<unsigned int>("systemColor");
++
++		if (elem->has("scrimPath") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("scrimPath")))
++			ScreenSaver.scrimPath = elem->get<std::string>("scrimPath");
++		if (elem->has("scrimHeight"))
++			ScreenSaver.scrimHeight = elem->get<float>("scrimHeight") * Renderer::getScreenHeight();
++
++		if (elem->has("screenSystems"))
++			ScreenSaver.screenSystems = Utils::String::split(elem->get<std::string>("screenSystems"), ' ', true);
++
++		// "snes=Super Nintendo; nes=Nintendo NES"
++		if (elem->has("systemNames"))
++		{
++			for (auto pair : Utils::String::split(elem->get<std::string>("systemNames"), ';', true))
++			{
++				auto eq = pair.find('=');
++				if (eq != std::string::npos)
++					ScreenSaver.systemNames[Utils::String::trim(pair.substr(0, eq))] = Utils::String::trim(pair.substr(eq + 1));
++			}
++		}
++	}
++
+ 	elem = theme->getElement("menu", "menutile", "menuTile");
+ 	if (elem && elem->has("path") && elem->has("selectedPath") &&
+ 		ResourceManager::getInstance()->fileExists(elem->get<std::string>("path")) &&
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index 5e6d2ef5..e5c77c47 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -211,6 +211,21 @@ struct TextEditElement
+ 	unsigned int caretColor;	// 0: the menu text's colour, dimmed while the field is not edited
+ };
+ 
++// The screensaver's names and the systems whose pictures take the screen's shape (menuScreenSaver); the stock
++// screensaver while it is not set
++struct ScreenSaverElement
++{
++	bool themed;
++	std::shared_ptr<Font> font;			// the game's name
++	unsigned int color;
++	std::shared_ptr<Font> systemFont;	// the system's name
++	unsigned int systemColor;
++	std::string scrimPath;				// under both names, across the screen's bottom
++	float scrimHeight;					// pixels
++	std::vector<std::string> screenSystems;				// systems (names) shown at the screen's 4:3, 3:4 upright
++	std::map<std::string, std::string> systemNames;	// system name -> the name shown
++};
++
+ // The tiles of a menu's image grid, the save states' (menuTile); the stock look while path is empty
+ struct TileElement
+ {
+@@ -258,6 +273,7 @@ public:
+ 		PromptElement Prompt { "", nullptr, 0 };
+ 		bool FooterAtBottom = false;	// menufooter atBottom
+ 		TileElement Tile { "", "", Vector2f(16, 16) };
++		ScreenSaverElement ScreenSaver { false, nullptr, 0xFFFFFFFF, nullptr, 0xD0D0D0FF, "", 0.0f, {}, {} };
+ 		KeyboardElement Keyboard { "", "", "", Vector2f(16, 16), 0.0f, 0xFFFFFFFF, 0xFFFFFFFF, nullptr, false, false };
+ 
+ 		std::string getMenuIcon(const std::string name)

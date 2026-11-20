@@ -1,0 +1,402 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 08:45:32 +0000
+Subject: [PATCH] Bind each system's last-played game and the console's last
+ game
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A system view can show a system's counts but not the game played there
+last, nor the game played last on the whole console. A home that offers
+to continue a system's game needs both.
+
+- {system:lastPlayed}: the game with the newest lastplayed among the
+  system's displayed games; {system:continue}: that game, else the
+  best-rated favorite (else the best-rated game), for systems never
+  played. Every game property follows: {system:lastPlayed:name},
+  ...:image, ...:developer. Computed with the other counts and kept as
+  paths, resolved on use, so a removed game is never dereferenced.
+- {system:hasLastPlayed} and {system:hasContinue} are true only while
+  the game still resolves. hasContinue is false on tools, emulators and
+  the screenshot viewer (hardware type tool, emulator or system, or a
+  group of those): what they ran last is shown, but not offered to run
+  again. A collection's last game and pick leave those systems out.
+- {game:lastplayedTime} ("HH:MM") and {game:lastplayedDays} (calendar
+  days since: 0 today, 1 yesterday, -1 never), so a theme can write
+  "Today · 18:17", "Yesterday" or a date in its own language; the
+  lastplayed date binding has no time.
+- {global:lastPlayed}: the game played last on the console, tools and
+  screenshots left out. es-core has no system list, so BindingManager
+  gets registerGlobalProperty() and the app registers it after loading
+  the systems.
+
+A game's own system kept its counts until its game list reloaded:
+refreshCollectionSystems (game played, favorite toggled, metadata
+saved) now resets the counts of the game's system and its group too.
+The system view also binds its extras again when shown, so coming back
+from a game shows the new counts and last game.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ THEMES_BINDINGS.md                     |  7 ++
+ es-app/src/CollectionSystemManager.cpp | 11 +++
+ es-app/src/FileData.cpp                | 22 ++++++
+ es-app/src/SystemData.cpp              | 99 ++++++++++++++++++++++++++
+ es-app/src/SystemData.h                | 10 +++
+ es-app/src/main.cpp                    |  9 +++
+ es-app/src/views/SystemView.cpp        |  3 +
+ es-core/src/BindingManager.cpp         | 12 ++++
+ es-core/src/BindingManager.h           |  4 ++
+ 9 files changed, 177 insertions(+)
+
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index cd366baa..eefdcc12 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -43,6 +43,10 @@ gamesPlayed                 int
+ mostPlayed                  int
+ gameTime                    string
+ lastPlayedDate              string
++lastPlayed                  game                   The game played last ({system:lastPlayed:name}); empty if none. A collection leaves out tools, emulators and screenshots
++continue                    game                   lastPlayed, else the best-rated favorite (else the best-rated game)
++hasLastPlayed               bool                   lastPlayed exists and still resolves to a game
++hasContinue                 bool                   continue resolves and is not on tools, emulators or screenshots (X does nothing there)
+ image                       path
+ showManual                  bool
+ showSaveStates              bool
+@@ -113,6 +117,8 @@ arcadesystemname            string
+ players                     string
+ playcount                   int
+ lastplayed                  date
++lastplayedTime              string                "HH:MM" of lastplayed, empty if never played
++lastplayedDays              int                   calendar days since lastplayed: 0 today, 1 yesterday, -1 never
+ crc32                       string
+ md5                         string	
+ lang                        string
+@@ -142,6 +148,7 @@ screenWidth                 int
+ screenHeight                int
+ screenRatio                 string
+ vertical                    bool
++lastPlayed                  game                  The game played last on the console, tools and screenshots left out ({global:lastPlayed:system:fullName})
+ ```	
+ 
+ **systemrandom:**
+diff --git a/es-app/src/CollectionSystemManager.cpp b/es-app/src/CollectionSystemManager.cpp
+index d8ba3174..0bed457f 100644
+--- a/es-app/src/CollectionSystemManager.cpp
++++ b/es-app/src/CollectionSystemManager.cpp
+@@ -441,6 +441,17 @@ void CollectionSystemManager::refreshCollectionSystems(FileData* file)
+ 	if (!file->getSystem()->isGameSystem() || file->getType() != GAME)
+ 		return;
+ 
++	// The game's own system (and its group) counts it too: played games, favorites, the last played
++	SystemData* source = file->getSourceFileData()->getSystem();
++	if (source != nullptr)
++	{
++		source->updateDisplayedGameCount();
++
++		SystemData* group = source->getParentGroupSystem();
++		if (group != nullptr && group != source)
++			group->updateDisplayedGameCount();
++	}
++
+ 	std::map<std::string, CollectionSystemData> allCollections;
+ 	allCollections.insert(mAutoCollectionSystemsData.cbegin(), mAutoCollectionSystemsData.cend());
+ 	allCollections.insert(mCustomCollectionSystemsData.cbegin(), mCustomCollectionSystemsData.cend());
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index 447ac042..679477e1 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -1971,6 +1971,28 @@ BindableProperty FileData::getProperty(const std::string& name)
+ 		return hasSaveState;
+ 	}
+ 
++	// When the game was last played: "HH:MM" and the calendar days since (0 today, -1 never)
++	if (name == "lastplayedTime" || name == "lastplayedDays")
++	{
++		std::string iso = getMetadata(MetaDataId::LastPlayed);
++		time_t played = iso.size() >= 15 && iso[8] == 'T' ? Utils::Time::stringToTime(iso) : 0;
++		if (played <= 0)
++			return name == "lastplayedDays" ? BindableProperty(-1) : BindableProperty::EmptyString;
++
++		if (name == "lastplayedTime")
++			return Utils::Time::timeToString(played, "%H:%M");
++
++		time_t now = time(nullptr);
++		tm day = *localtime(&played);
++		tm today = *localtime(&now);
++		day.tm_hour = today.tm_hour = 12;
++		day.tm_min = today.tm_min = day.tm_sec = today.tm_sec = 0;
++		day.tm_isdst = today.tm_isdst = -1;
++
++		int days = (int)Math::round((float)(difftime(mktime(&today), mktime(&day)) / 86400.0));
++		return Math::max(0, days);
++	}
++
+ 	if (name == "releaseyear" || name == "releaseYear")
+ 	{
+ 		std::string releaseDateMeta = getMetadata(MetaDataId::ReleaseDate);
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 62b6e4e2..4ba6167d 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -1430,6 +1430,8 @@ GameCountInfo* SystemData::getGameCountInfo()
+ 	mGameCountInfo->playTime = 0;
+ 	
+ 	int mostPlayCount = 0;
++	float chefScore = 0;
++	std::string lastPlayedStamp;
+ 
+ 	for (auto game : games)
+ 	{
+@@ -1459,6 +1461,24 @@ GameCountInfo* SystemData::getGameCountInfo()
+ 		auto lastPlayed = game->getMetadata(MetaDataId::LastPlayed);
+ 		if (!lastPlayed.empty() && lastPlayed > mGameCountInfo->lastPlayedDate)
+ 			mGameCountInfo->lastPlayedDate = lastPlayed;
++
++		// A collection never continues a tool, an emulator or a screenshot
++		if (isCollection() && isUtilitySystem(game->getSourceFileData()->getSystem()))
++			continue;
++
++		if (!lastPlayed.empty() && lastPlayed > lastPlayedStamp)
++		{
++			lastPlayedStamp = lastPlayed;
++			mGameCountInfo->lastPlayedPath = game->getPath();
++		}
++
++		// Favorites first, then the rating (0 to 1)
++		float score = (game->getFavorite() ? 2.0f : 0.0f) + Utils::String::toFloat(game->getMetadata(MetaDataId::Rating));
++		if (score > chefScore)
++		{
++			chefScore = score;
++			mGameCountInfo->chefPickPath = game->getPath();
++		}
+ 	}
+ 
+ 	return mGameCountInfo;
+@@ -2118,6 +2138,72 @@ BindableProperty BindableRandom::getProperty(const std::string& name)
+ 	return mRandom;
+ }
+ 
++// Paths are kept rather than pointers: the counts are only reset when a game changes, and a game
++// can be removed in between.
++FileData* SystemData::getLastPlayedGame(bool orChefPick)
++{
++	GameCountInfo* info = getGameCountInfo();
++	if (info == nullptr || mRootFolder == nullptr)
++		return nullptr;
++
++	FileData* game = info->lastPlayedPath.empty() ? nullptr : mRootFolder->FindByPath(info->lastPlayedPath);
++	if (game == nullptr && orChefPick && !info->chefPickPath.empty())
++		game = mRootFolder->FindByPath(info->chefPickPath);
++
++	return game;
++}
++
++FileData* SystemData::getContinueGame()
++{
++	return isUtilitySystem(this) ? nullptr : getLastPlayedGame(true);
++}
++
++// Tools, emulators and the screenshot viewer (a group's systems count as their group's): what they ran
++// is shown, but X does not run it again.
++bool SystemData::isUtilitySystem(SystemData* system)
++{
++	if (system == nullptr)
++		return false;
++
++	for (SystemData* s : { system, system->getParentGroupSystem() })
++	{
++		if (s == nullptr)
++			continue;
++
++		const std::string& hardware = s->getSystemMetadata().hardwareType;
++		if (hardware == "tool" || hardware == "emulator" || hardware == "system" || s->hasPlatformId(PlatformIds::IMAGEVIEWER) ||
++			s->getName() == "tools" || s->getName() == "emulators" || s->getName() == "imageviewer")
++			return true;
++	}
++
++	return false;
++}
++
++FileData* SystemData::getConsoleLastPlayedGame()
++{
++	FileData* last = nullptr;
++	std::string lastDate;
++
++	for (auto system : sSystemVector)
++	{
++		if (system->isCollection() || !system->isGameSystem() || system->getName() == "tools" || system->getName() == "imageviewer")
++			continue;
++
++		FileData* game = system->getLastPlayedGame();
++		if (game == nullptr)
++			continue;
++
++		std::string date = game->getMetadata(MetaDataId::LastPlayed);
++		if (date > lastDate)
++		{
++			lastDate = date;
++			last = game;
++		}
++	}
++
++	return last;
++}
++
+ BindableProperty SystemData::getProperty(const std::string& name)
+ {
+ 	auto it = properties.find(name);
+@@ -2207,6 +2293,19 @@ BindableProperty SystemData::getProperty(const std::string& name)
+ 		return timeText;
+ 	}
+ 
++	if (name == "lastPlayed" || name == "continue")
++	{
++		FileData* game = getLastPlayedGame(name == "continue");
++		return game != nullptr ? BindableProperty((IBindable*)game) : BindableProperty::Null;
++	}
++
++	// Only a game that still resolves: the panel never offers a game X cannot start
++	if (name == "hasLastPlayed")
++		return getLastPlayedGame() != nullptr;
++
++	if (name == "hasContinue")
++		return getContinueGame() != nullptr;
++
+ 	if (name == "lastPlayedDate")
+ 	{
+ 		Utils::Time::DateTime dt = info->lastPlayedDate;
+diff --git a/es-app/src/SystemData.h b/es-app/src/SystemData.h
+index 0f50697c..3a62d26b 100644
+--- a/es-app/src/SystemData.h
++++ b/es-app/src/SystemData.h
+@@ -36,6 +36,8 @@ struct GameCountInfo
+ 	long playTime;
+ 	std::string mostPlayed;
+ 	std::string lastPlayedDate;
++	std::string lastPlayedPath;	// the game played last, if any
++	std::string chefPickPath;	// the best-rated favorite (else best-rated game), for systems never played
+ };
+ 
+ struct SystemMetadata
+@@ -110,6 +112,14 @@ public:
+ 	GameCountInfo* getGameCountInfo();
+ 	void updateDisplayedGameCount();
+ 
++	// The game played last (nullptr if none); with orChefPick, else the best-rated favorite or game
++	FileData* getLastPlayedGame(bool orChefPick = false);
++	// What X continues: getLastPlayedGame(true), nothing on a utility system
++	FileData* getContinueGame();
++	static bool isUtilitySystem(SystemData* system);
++	// The game played last on the console (tools and screenshots left out)
++	static FileData* getConsoleLastPlayedGame();
++
+ 	static bool IsManufacturerSupported;
+ 	static bool hasDirtySystems();
+ 	static void deleteSystems();
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 84986860..2c2ebb35 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -42,6 +42,8 @@
+ #include "watchers/WatchersManager.h"
+ #include "HttpReq.h"
+ #include "QuickResume.h"
++#include "BindingManager.h"
++#include "FileData.h"
+ 
+ #ifdef WIN32
+ #include <Windows.h>
+@@ -294,6 +296,13 @@ bool loadSystemConfigFile(Window* window, const char** errorString)
+ 		return false;
+ 	}
+ 
++	// {global:lastPlayed}: the game played last on the console
++	BindingManager::registerGlobalProperty("lastPlayed", []
++	{
++		FileData* game = SystemData::getConsoleLastPlayedGame();
++		return game != nullptr ? BindableProperty((IBindable*)game) : BindableProperty::Null;
++	});
++
+ #ifdef KNULLI
+ 	ApiSystem::getInstance()->callBatoceraPreGameListsHook();
+ #endif
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index 59e944b6..e2cf60bd 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -1677,6 +1677,9 @@ void SystemView::onShow()
+ 
+ 	mCarousel.onShow();
+ 
++	// What changed while hidden (a game played since, a favorite) shows at once
++	updateExtraTextBinding();
++
+ 	activateExtras(mCarousel.getCursorIndex());
+ 
+ 	for (auto sb : mStaticBackgrounds)
+diff --git a/es-core/src/BindingManager.cpp b/es-core/src/BindingManager.cpp
+index d1d9238a..abe0612d 100644
+--- a/es-core/src/BindingManager.cpp
++++ b/es-core/src/BindingManager.cpp
+@@ -2,6 +2,7 @@
+ #include "utils/StringUtil.h"
+ #include "LocaleES.h"
+ #include <time.h>
++#include <map>
+ 
+ #include "components/TextComponent.h"
+ #include "components/ImageComponent.h"
+@@ -15,10 +16,16 @@
+ BindableProperty BindableProperty::Null;
+ BindableProperty BindableProperty::EmptyString("", BindablePropertyType::String);
+ 
++static std::map<std::string, std::function<BindableProperty()>> sGlobalProperties;
++
+ class GlobalBinding : public IBindable
+ {
+ 	BindableProperty getProperty(const std::string& name) override
+ 	{
++		auto registered = sGlobalProperties.find(name);
++		if (registered != sGlobalProperties.cend())
++			return registered->second();
++
+ 		if (name == "help")
+ 			return Settings::getInstance()->getBool("ShowHelpPrompts");
+ 
+@@ -76,6 +83,11 @@ static GlobalBinding globalBinding;
+ // BindingManager
+ /////////////////////////////////////////////////////////////////////////////////////////////
+ 
++void BindingManager::registerGlobalProperty(const std::string& name, const std::function<BindableProperty()>& getter)
++{
++	sGlobalProperties[name] = getter;
++}
++
+ void BindingManager::bindValues(IBindable* current, std::string& xp, bool showDefaultText, std::string& evaluableExpression)
+ {
+ 	std::string typeName = current->getBindableTypeName();
+diff --git a/es-core/src/BindingManager.h b/es-core/src/BindingManager.h
+index 36b9bd5d..b4808ab0 100644
+--- a/es-core/src/BindingManager.h
++++ b/es-core/src/BindingManager.h
+@@ -4,6 +4,7 @@
+ 
+ #include <string>
+ #include <vector>
++#include <functional>
+ 
+ class GuiComponent;
+ class IBindable;
+@@ -107,6 +108,9 @@ class BindingManager
+ public:
+ 	static void          updateBindings(GuiComponent* comp, IBindable* system, bool recursive = true);
+ 
++	// Adds a {global:name} property, read when bindings update (the app registers what es-core cannot see)
++	static void          registerGlobalProperty(const std::string& name, const std::function<BindableProperty()>& getter);
++
+ private:
+ 	static void          bindValues(IBindable* current, std::string& xp, bool showDefaultText, std::string& evaluableExpression);
+ 	static std::string   updateBoundExpression(std::string& xp, IBindable* bindable, bool showDefaultText);

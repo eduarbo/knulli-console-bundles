@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 03:17:50 +0000
+Subject: [PATCH] Never start a video over a start still under way
+
+- A theme binding a video's "enabled" set it again on every binding pass;
+  enabling an enabled video cleared its waiting state without stopping
+  it, so the next update started it again while the worker still made the
+  first player. The second start replaced the media without releasing it,
+  reused frame buffers sized for the first video (too small for a larger
+  one) and dropped the first start without cancelling it: that player
+  kept playing with no component.
+- Enabling an enabled video now changes nothing; a start lets go of an
+  earlier one's player, media and buffers first; the buffers are made
+  again when the size changes. The players alive are counted in the debug
+  log.
+---
+ es-core/src/components/VideoComponent.cpp    |  4 ++
+ es-core/src/components/VideoVlcComponent.cpp | 50 ++++++++++++++++----
+ es-core/src/components/VideoVlcComponent.h   |  3 ++
+ 3 files changed, 48 insertions(+), 9 deletions(-)
+
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 5870baf6..6eb6d384 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -667,6 +667,10 @@ void VideoComponent::setProperty(const std::string name, const ThemeData::ThemeE
+ 	}
+ 	else if (value.type == ThemeData::ThemeElement::Property::PropertyType::Bool && name == "enabled")
+ 	{
++		// Bound again to the same value (each binding pass): nothing changes, a start under way goes on
++		if (value.b == mEnabled)
++			return;
++
+ 		mEnabled = value.b;
+ 
+ 		if (!mEnabled)
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 5965a574..202a7c41 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -9,6 +9,7 @@
+ #include <vlc/vlc.h>
+ #include <SDL_mutex.h>
+ #include <cmath>
++#include <atomic>
+ #include <chrono>
+ #include <condition_variable>
+ #include <deque>
+@@ -178,12 +179,22 @@ namespace
+ 		bool mStarted;
+ 	};
+ 
++	// The players alive (made and not yet released), in the debug log when it changes (tests)
++	std::atomic<int> sPlayers(0);
++
++	void countPlayers(int change)
++	{
++		int players = (sPlayers += change);
++		LOG(LogDebug) << "VideoVlcComponent: " << players << " players";
++	}
++
+ 	void stopOnWorker(libvlc_media_player_t* player, std::shared_ptr<VideoContext> context)
+ 	{
+ 		PlayerWorker::post([player, context]
+ 		{
+ 			libvlc_media_player_stop(player);
+ 			libvlc_media_player_release(player);
++			countPlayers(-1);
+ 		});
+ 	}
+ 
+@@ -230,6 +241,9 @@ namespace
+ 			libvlc_media_release(start->media);
+ 			start->media = nullptr;
+ 
++			if (player != nullptr)
++				countPlayers(1);
++
+ 			if (player != nullptr)
+ 			{
+ 				if (start->mute)
+@@ -251,6 +265,7 @@ namespace
+ 				{
+ 					libvlc_media_player_stop(player);
+ 					libvlc_media_player_release(player);
++					countPlayers(-1);
+ 				}
+ 
+ 				start->context = nullptr;
+@@ -764,13 +779,18 @@ void VideoVlcComponent::render(const Transform4x4f& parentTrans)
+ 
+ void VideoVlcComponent::setupContext()
+ {
+-	if (mContext != nullptr && mContext->valid)
++	// The frames' buffers are made for one size
++	if (mContext != nullptr && mContext->valid && mContext->width == mVideoWidth && mContext->height == mVideoHeight)
+ 		return;
+-	
++
++	freeContext();
++
+ 	// Create an RGBA surface to render the video into
+ 	mContext = std::make_shared<VideoContext>();
+ 	mContext->surfaces[0] = new unsigned char[mVideoWidth * mVideoHeight * 4];
+ 	mContext->surfaces[1] = new unsigned char[mVideoWidth * mVideoHeight * 4];
++	mContext->width = mVideoWidth;
++	mContext->height = mVideoHeight;
+ 	mContext->valid = true;
+ 	resize();	
+ }
+@@ -970,6 +990,12 @@ void VideoVlcComponent::startVideo()
+ 	if (mIsPlaying || mParsing)
+ 		return;
+ 
++	// A start before this one may still hold a player being made, a player, its media or its frames (the
++	// component was asked to start again before the first one showed): they go first, so no player is left
++	// without its component and no buffer is reused for another size
++	if (mStart != nullptr || mMediaPlayer != nullptr || mMedia != nullptr || mContext != nullptr)
++		releasePlayback();
++
+ 	if (hasStoryBoard("", true) && mConfig.startDelay > 0)
+ 		startStoryboard();
+ 
+@@ -1207,6 +1233,18 @@ void VideoVlcComponent::checkStart()
+ }
+ 
+ void VideoVlcComponent::stopVideo()
++{
++	mIsPlaying = false;
++	mIsWaitingForVideoToStart = false;
++	mStartDelayed = false;
++
++	releasePlayback();
++	PowerSaver::resume();
++	AudioManager::setVideoPlaying(false);
++}
++
++// Lets go of what a start made: its parse, its player (being made or made), its media and its frames
++void VideoVlcComponent::releasePlayback()
+ {
+ 	// A parse under way is dropped with the media (on the worker: stopping it waits for VLC's reader)
+ 	if (mParsing && mMedia)
+@@ -1217,10 +1255,6 @@ void VideoVlcComponent::stopVideo()
+ 
+ 	mParsing = false;
+ 
+-	mIsPlaying = false;
+-	mIsWaitingForVideoToStart = false;
+-	mStartDelayed = false;
+-
+ 	// A player still being made is stopped by the worker when it is; one made is taken to stop it too
+ 	if (mStart != nullptr)
+ 	{
+@@ -1247,10 +1281,8 @@ void VideoVlcComponent::stopVideo()
+ 		releaseOnWorker(mMedia);
+ 		mMedia = NULL;
+ 	}
+-		
++
+ 	freeContext();
+-	PowerSaver::resume();	
+-	AudioManager::setVideoPlaying(false);
+ }
+ 
+ void VideoVlcComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, const std::string& view, const std::string& element, unsigned int properties)
+diff --git a/es-core/src/components/VideoVlcComponent.h b/es-core/src/components/VideoVlcComponent.h
+index addbcc6b..51556bcb 100644
+--- a/es-core/src/components/VideoVlcComponent.h
++++ b/es-core/src/components/VideoVlcComponent.h
+@@ -22,6 +22,7 @@ struct VideoContext
+ 		surfaces[1] = nullptr;
+ 		valid = false;
+ 		displayed = false;
++		width = height = 0;
+ 		hasFrame[0] = false;
+ 		hasFrame[1] = false;
+ 		surfaceId = 0;
+@@ -39,6 +40,7 @@ struct VideoContext
+ 	bool				hasFrame[2];
+ 
+ 	bool				valid;
++	unsigned int		width, height;	// of the buffers
+ 	// Set by VLC's display callback; the UI thread starts showing the video (VideoVlcComponent::checkDisplayed)
+ 	std::atomic<bool>	displayed;
+ };
+@@ -142,6 +144,7 @@ private:
+ 
+ 	void setupContext();
+ 	void freeContext();
++	void releasePlayback();
+ 
+ 	// startVideo asks VLC to read the file's tracks on its own thread; each frame checkParse looks whether it
+ 	// has, then playback starts (startPlayback). Until then the snapshot or what is under the video shows and

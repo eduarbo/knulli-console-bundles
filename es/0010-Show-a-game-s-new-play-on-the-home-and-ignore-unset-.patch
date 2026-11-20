@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 08:46:04 +0000
+Subject: [PATCH] Show a game's new play on the home and ignore unset play
+ dates
+
+Two gaps of the home's last-played bindings, found in an off-device
+render:
+
+- A game never played has lastplayed "0" (the metadata default), which
+  sorts after an empty string, so {system:lastPlayed} picked the first
+  unplayed game of a system nobody had played, and X started it. Only
+  a real date (YYYYMMDDTHHMMSS) counts now.
+- After a game started from the home (X), ES calls onFileChanged but
+  never shows the system view again, so its counts and last game kept
+  the values from before the game. ViewController::onFileChanged now
+  binds the system view's extras again.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ es-app/src/SystemData.cpp           | 3 ++-
+ es-app/src/views/SystemView.h       | 3 +++
+ es-app/src/views/ViewController.cpp | 4 ++++
+ 3 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 4ba6167d..2fd12c91 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -1466,7 +1466,8 @@ GameCountInfo* SystemData::getGameCountInfo()
+ 		if (isCollection() && isUtilitySystem(game->getSourceFileData()->getSystem()))
+ 			continue;
+ 
+-		if (!lastPlayed.empty() && lastPlayed > lastPlayedStamp)
++		// Only a real date (YYYYMMDDTHHMMSS): a game never played has the default "0"
++		if (lastPlayed.size() >= 15 && lastPlayed[8] == 'T' && lastPlayed > lastPlayedStamp)
+ 		{
+ 			lastPlayedStamp = lastPlayed;
+ 			mGameCountInfo->lastPlayedPath = game->getPath();
+diff --git a/es-app/src/views/SystemView.h b/es-app/src/views/SystemView.h
+index 0e3caa2a..c67127f8 100644
+--- a/es-app/src/views/SystemView.h
++++ b/es-app/src/views/SystemView.h
+@@ -79,6 +79,9 @@ public:
+ 	// The index of the tab that shows a system, in the theme's "systemtabs" order; -1 without tabs
+ 	static int getSystemTab(SystemData* system);
+ 
++	// Binds the selected system's extras again (its counts or last game changed)
++	void refreshBindings() { updateExtraTextBinding(); }
++
+ protected:
+ 	//virtual void onCursorChanged(const CursorState& state) override;
+ 	void onCursorChanged(const CursorState& state);
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index b4f6ea92..cf75cc63 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -423,6 +423,10 @@ void ViewController::playViewTransition(bool forceImmediate)
+ 
+ void ViewController::onFileChanged(FileData* file, FileChangeType change)
+ {
++	// The system view shows counts and last games too (back from a game launched there, say)
++	if (mSystemListView != nullptr)
++		mSystemListView->refreshBindings();
++
+ 	std::string key = file->getFullPath();
+ 	auto sourceSystem = file->getSourceFileData()->getSystem();
+ 

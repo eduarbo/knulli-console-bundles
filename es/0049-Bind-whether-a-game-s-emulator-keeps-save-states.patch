@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:37:58 +0000
+Subject: [PATCH] Bind whether a game's emulator keeps save states
+
+- {game:saveStatesSupported}: true when the game's system has save states
+  (what X opens in a game list), so a theme can show what X does.
+---
+ es-app/src/FileData.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index de3c3658..960f1e40 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -1989,6 +1989,10 @@ BindableProperty FileData::getProperty(const std::string& name)
+ 		return Utils::FileSystem::exists(getMetadata(MetaDataId::Manual)) || Utils::FileSystem::exists(getMetadata(MetaDataId::Magazine)); // ? _("YES") : _("NO");
+ 	}
+ 
++	// Whether the game's emulator keeps save states (what the game list's X opens), whether it has one or not
++	if (name == "saveStatesSupported")
++		return SaveStateRepository::isEnabled(this);
++
+ 	if (name == "hasSaveState" || name == "hassavestate" || name == "savestate")
+ 	{
+ 		bool hasSaveState = SaveStateRepository::isEnabled(this) && getSourceFileData()->getSystem()->getSaveStateRepository()->hasSaveStates(this);

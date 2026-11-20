@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:18:11 +0000
+Subject: [PATCH] Let a stack give its last element the room left
+
+A text at the end of a vertical stack (a game's description under its
+name, data and facts) starts wherever the elements above it end, so
+no fixed height suits it: the stack cut it in the middle of a line at
+its bottom. A vertical stackpanel with fillLast gives its last shown
+element the room left under the others, and a text with maxLines in a
+box of a height of its own keeps no more lines than the box holds
+whole, the last one ending with an ellipsis.
+---
+ THEMES.md                                     | 12 ++++++++++-
+ es-core/src/ThemeData.cpp                     |  1 +
+ .../src/components/StackPanelComponent.cpp    | 21 ++++++++++++++++++-
+ es-core/src/components/StackPanelComponent.h  |  2 ++
+ es-core/src/components/TextComponent.cpp      | 11 +++++++++-
+ 5 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 29be6e57..17e900bb 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1107,7 +1107,7 @@ Can be created as an extra.
+ * `forceUppercase` - type: BOOLEAN.  Draw text in uppercase.
+ * `lineSpacing` - type: FLOAT.  Controls the space between lines (as a multiple of font height).  Default is 1.5.
+ * `maxLines` - type: FLOAT.
+-	- At most that many lines of a wrapped text: the last one ends with an ellipsis (…) where the text goes on, and a text sized `w 0` is as tall as the lines it keeps.  Default is 0 (every line).
++	- At most that many lines of a wrapped text: the last one ends with an ellipsis (…) where the text goes on, and a text sized `w 0` is as tall as the lines it keeps.  A box of a height of its own keeps no more lines than it holds whole.  Default is 0 (every line).
+ * `visible` - type: BOOLEAN.
+     - If true, component will be rendered, otherwise rendering will be skipped.  Can be used to hide elements from a particular view.
+ * `zIndex` - type: FLOAT.
+@@ -1135,6 +1135,16 @@ Can be created as an extra.
+ * `storyboard' - type: STORYBOARD.    
+     - BATOCERA 29 : See storyboard documentation.
+ 
++#### stackpanel
++
++Can be created as an extra; its children are laid out one after the other.
++
++* `orientation` - type: STRING.  "horizontal" (default) or "vertical".
++* `reverse` - type: BOOLEAN.  From the right (or the bottom).
++* `separator` - type: FLOAT.  The gap between children, in pixels (or a fraction of the panel's height or width under 1).
++* `fillLast` - type: BOOLEAN.
++	- Vertical: the last child shown takes the room left under the others (a text with `maxLines` then keeps the whole lines that fit).
++
+ #### textlist
+ 
+ * `pos` - type: NORMALIZED_PAIR.
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index af6be0f6..3f82df69 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -80,6 +80,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "orientation", STRING },			// horizontal, vertical
+ 		{ "reverse", BOOLEAN },
+ 		{ "separator", FLOAT },
++		{ "fillLast", BOOLEAN },				// vertical: the last element shown takes the room left
+ 		{ "opacity", FLOAT },
+ 		{ "visible", BOOLEAN },
+ 		{ "clipChildren", BOOLEAN },
+diff --git a/es-core/src/components/StackPanelComponent.cpp b/es-core/src/components/StackPanelComponent.cpp
+index 151355ad..42e7f060 100644
+--- a/es-core/src/components/StackPanelComponent.cpp
++++ b/es-core/src/components/StackPanelComponent.cpp
+@@ -4,7 +4,7 @@
+ #include "components/ImageComponent.h"
+ #include "components/TextComponent.h"
+ 
+-StackPanelComponent::StackPanelComponent(Window* window) : GuiComponent(window), mHorizontal(true), mReverse(false), mSeparator(0.0f)
++StackPanelComponent::StackPanelComponent(Window* window) : GuiComponent(window), mHorizontal(true), mReverse(false), mFillLast(false), mSeparator(0.0f)
+ {
+ 	mClipChildren = true;
+ }
+@@ -50,6 +50,8 @@ void StackPanelComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, co
+ 	if (elem->has("reverse"))
+ 		mReverse = elem->get<bool>("reverse");
+ 
++	mFillLast = elem->has("fillLast") && elem->get<bool>("fillLast");
++
+ 	if (elem->has("separator"))
+ 	{
+ 		mSeparator = elem->get<float>("separator");
+@@ -203,6 +205,23 @@ void StackPanelComponent::performLayout()
+ 			}
+ 		}
+ 	}
++
++	// The last element shown takes the room left under the others (a text then keeps the whole lines it holds)
++	if (mFillLast && !mHorizontal && !mReverse)
++	{
++		GuiComponent* last = nullptr;
++		for (auto child : mChildren)
++			if (child->isVisible())
++				last = child;
++
++		if (last != nullptr)
++		{
++			float top = last->getPosition().y() - last->getSize().y() * last->getOrigin().y();
++			float room = Math::max(0.0f, mSize.y() - top);
++			if (room > 0 && last->getSize().y() != room)
++				last->setSize(last->getSize().x(), room);
++		}
++	}
+ }
+ 
+ void StackPanelComponent::update(int deltaTime)
+diff --git a/es-core/src/components/StackPanelComponent.h b/es-core/src/components/StackPanelComponent.h
+index 7c3c4147..11fcb24d 100644
+--- a/es-core/src/components/StackPanelComponent.h
++++ b/es-core/src/components/StackPanelComponent.h
+@@ -28,6 +28,8 @@ private:
+ 
+ 	bool mHorizontal;
+ 	bool mReverse;
++	// Vertical: the last element shown takes the room left under the others
++	bool mFillLast;
+ 
+ 	float mSeparator;
+ 
+diff --git a/es-core/src/components/TextComponent.cpp b/es-core/src/components/TextComponent.cpp
+index ff84b327..ac6c48b4 100644
+--- a/es-core/src/components/TextComponent.cpp
++++ b/es-core/src/components/TextComponent.cpp
+@@ -735,8 +735,17 @@ std::string TextComponent::wrapLines(const std::string& text, float width)
+ 	if (mMaxLines <= 0)
+ 		return wrapped;
+ 
++	// A box of a height of its own (not one fitted to the text) keeps the whole lines it holds
++	int maxLines = mMaxLines;
++	if (!mAutoCalcExtent.y() && mSize.y() > 0)
++	{
++		float lineHeight = mFont->getHeight(mLineSpacing);
++		if (lineHeight > 0)
++			maxLines = std::min(maxLines, std::max(1, (int)((mSize.y() - mPadding.y() - mPadding.w() + 1.0f) / lineHeight)));
++	}
++
+ 	size_t start = 0;
+-	for (int line = 1; line < mMaxLines; line++)
++	for (int line = 1; line < maxLines; line++)
+ 	{
+ 		start = wrapped.find('\n', start);
+ 		if (start == std::string::npos)

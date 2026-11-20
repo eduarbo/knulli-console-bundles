@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:41:57 +0000
+Subject: [PATCH] Let a theme show the main menu's version line at its bottom
+
+On full-screen menus the version line sat under the main menu's
+title as the raw version string, build time and tags included.
+
+menufooter gains atBottom: the main menu then shows a short line at
+its bottom, under the list and any buttons: the system's name, its
+version without the time or bracketed tags, and the board, in
+capitals and separated by middle dots. Without it nothing changes.
+---
+ THEMES.md                                |  5 +++-
+ es-app/src/guis/GuiMenu.cpp              | 30 ++++++++++++++++++++-
+ es-app/src/guis/GuiMenu.h                |  1 +
+ es-core/src/ThemeData.cpp                |  3 +++
+ es-core/src/ThemeData.h                  |  1 +
+ es-core/src/components/MenuComponent.cpp | 33 +++++++++++++++++++++---
+ es-core/src/components/MenuComponent.h   |  6 +++++
+ 7 files changed, 74 insertions(+), 5 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 217f2aa8..07b1fef1 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -844,7 +844,7 @@ ES versions with slides support the feature `slideshow`.
+ 	- text for all menu entries
+ * `menuText name="menutitle"` - FONTPATH | FONTSIZE | COLOR
+ 	- text for menu titles
+-* `menuText name="menufooter"` - FONTPATH | FONTSIZE | COLOR
++* `menuText name="menufooter"` - FONTPATH | FONTSIZE | COLOR | ATBOTTOM
+ 	- text for menu footers or subtitles
+ * `menuTextSmall name="menutextsmall"` - FONTPATH | FONTSIZE | COLOR
+ 	- text for menu entries in smallerfont
+@@ -1463,6 +1463,9 @@ BATOCERA 5.24
+ 	- Default is 878787FF. Color of the selector bar.
+ * `selectorColorEnd` - type: NORMALIZED_PAIR. 
+     - Bottom color for the gradient of the "selector bar."
++* `atBottom` - type: BOOLEAN. (`menufooter` only)
++	- Full-screen menus show the main menu's version line at their bottom, short (name, version, board), instead of
++	  under the title. Default is false.
+ * `rowHeight` - type: FLOAT. (`menutext` only)
+ 	- A list row's least height, as a fraction of the screen height (groups keep their own). Default: the row's content.
+ * `rowPadding` - type: FLOAT. (`menutext` only)
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index 44a47ccb..9d13d673 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -252,6 +252,28 @@ void GuiMenu::openConfigInput()
+ 	);
+ }
+ 
++// The system's name, its version without the build time or tags, and the board, in capitals and apart:
++// "KNULLI - SCARAB 2026/05/11 - RG35XX-H", with middle dots
++std::string GuiMenu::getShortVersionLabel()
++{
++	static std::string board = ApiSystem::getInstance()->getRunningBoard();
++
++	std::vector<std::string> version;
++	for (auto word : Utils::String::split(ApiSystem::getInstance()->getVersion(), ' ', true))
++	{
++		bool time = word.size() == 5 && word[2] == ':' && isdigit(word[0]) && isdigit(word[1]) && isdigit(word[3]) && isdigit(word[4]);
++		if (!time && word[0] != '[' && word[0] != '(')
++			version.push_back(word);
++	}
++
++	std::vector<std::string> parts;
++	for (auto part : { ApiSystem::getInstance()->getApplicationName(), Utils::String::join(version, " "), board })
++		if (!Utils::String::trim(part).empty())
++			parts.push_back(Utils::String::toUpper(Utils::String::trim(part)));
++
++	return Utils::String::join(parts, _U(" \u00B7 "));
++}
++
+ void GuiMenu::addVersionInfo()
+ {
+ 	std::string  buildDate = (Settings::getInstance()->getBool("Debug") ? std::string( "   (" + Utils::String::toUpper(PROGRAM_BUILT_STRING) + ")") : (""));
+@@ -278,7 +300,13 @@ void GuiMenu::addVersionInfo()
+ 
+ 	if (!label.empty())
+ 	{
+-		if (Renderer::ScreenSettings::fullScreenMenus())
++		if (Renderer::ScreenSettings::fullScreenMenus() && theme->FooterAtBottom)
++		{
++			// At the menu's bottom (menufooter atBottom), short
++			mMenu.addButton(_("BACK"), _("go back"), [&] { delete this; });
++			mMenu.setFooter(getShortVersionLabel());
++		}
++		else if (Renderer::ScreenSettings::fullScreenMenus())
+ 		{
+ 			mMenu.setSubTitle(label);
+ 			mMenu.addButton(_("BACK"), _("go back"), [&] { delete this; });
+diff --git a/es-app/src/guis/GuiMenu.h b/es-app/src/guis/GuiMenu.h
+index bb5532b5..a47fbb54 100644
+--- a/es-app/src/guis/GuiMenu.h
++++ b/es-app/src/guis/GuiMenu.h
+@@ -44,6 +44,7 @@ public:
+ private:
+         void addEntry(const std::string& name, bool add_arrow, const std::function<void()>& func, const std::string iconName = "");
+         void addVersionInfo();
++        std::string getShortVersionLabel();
+         void openCollectionSystemSettings();
+         void openConfigInput(); 
+         void openScraperSettings();
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 319c5768..9a057ce7 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -640,6 +640,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "rowPadding", FLOAT },
+ 		{ "iconSize", FLOAT },
+ 		{ "fullRows", BOOLEAN },
++		{ "atBottom", BOOLEAN },
+ 		{ "separatorColor", COLOR },
+ 		{ "selectorColor", COLOR },
+ 		{ "selectorColorEnd", COLOR },
+@@ -2418,6 +2419,8 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			Footer.color = elem->get<unsigned int>("color");
+ 		if (elem->has("selectorColor"))
+ 			Footer.selectorColor = elem->get<unsigned int>("selectorColor");
++		if (elem->has("atBottom"))
++			FooterAtBottom = elem->get<bool>("atBottom");
+ 	}
+ 
+ 	elem = theme->getElement("menu", "menutextsmall", "menuTextSmall");
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index f91642f4..fe1a84b0 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -235,6 +235,7 @@ public:
+ 		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16), 0, 0, 0.0f };
+ 		TextEditElement TextEdit { nullptr, 0 };
+ 		MenuRowElement Row { 0.0f, 10.0f, 0.0f, false };
++		bool FooterAtBottom = false;	// menufooter atBottom
+ 		TileElement Tile { "", "", Vector2f(16, 16) };
+ 		KeyboardElement Keyboard { "", "", "", Vector2f(16, 16), 0.0f, 0xFFFFFFFF, 0xFFFFFFFF, nullptr, false, false };
+ 
+diff --git a/es-core/src/components/MenuComponent.cpp b/es-core/src/components/MenuComponent.cpp
+index e9ab377c..8ff89cf0 100644
+--- a/es-core/src/components/MenuComponent.cpp
++++ b/es-core/src/components/MenuComponent.cpp
+@@ -12,7 +12,7 @@ MenuComponent::MenuComponent(Window* window,
+ 	const std::string& title, const std::shared_ptr<Font>& titleFont,
+ 	const std::string& subTitle) 
+ 	: GuiComponent(window),
+-	mBackground(window), mGrid(window, Vector2i(1, 3))
++	mBackground(window), mGrid(window, Vector2i(1, 4))
+ {
+ 	mMaxHeight = 0;
+ 
+@@ -328,9 +328,35 @@ float MenuComponent::getHeaderGridHeight() const
+ float MenuComponent::getButtonGridHeight() const
+ {
+ 	auto menuTheme = ThemeData::getMenuTheme();
++
++	// A footer under no buttons takes their band
++	if (mFooter && !mButtonGrid)
++		return 0;
++
+ 	return (mButtonGrid ? mButtonGrid->getSize().y() : menuTheme->Text.font->getHeight() + BUTTON_GRID_VERT_PADDING);	
+ }
+ 
++float MenuComponent::getFooterHeight() const
++{
++	return mFooter ? mFooter->getFont()->getHeight() + BUTTON_GRID_VERT_PADDING : 0;
++}
++
++void MenuComponent::setFooter(const std::string& text)
++{
++	auto theme = ThemeData::getMenuTheme();
++
++	if (mFooter == nullptr)
++	{
++		mFooter = std::make_shared<TextComponent>(mWindow, text, theme->Footer.font, theme->Footer.color, ALIGN_CENTER);
++		mGrid.setEntry(mFooter, Vector2i(0, 3), false, true);
++	}
++	else
++		mFooter->setText(text);
++
++	updateSize();
++	onSizeChanged();
++}
++
+ void MenuComponent::updateSize()
+ {
+ 	// GPI
+@@ -342,10 +368,10 @@ void MenuComponent::updateSize()
+ 
+ 	const float maxHeight = mMaxHeight <= 0 ? Renderer::getScreenHeight() * 0.75f : mMaxHeight;
+ 
+-	float height = TITLE_HEIGHT + mList->getTotalRowHeight() + getButtonGridHeight() + 2;
++	float height = TITLE_HEIGHT + mList->getTotalRowHeight() + getButtonGridHeight() + getFooterHeight() + 2;
+ 	if(height > maxHeight)
+ 	{
+-		height = TITLE_HEIGHT + getButtonGridHeight();
++		height = TITLE_HEIGHT + getButtonGridHeight() + getFooterHeight();
+ 		int i = 0;
+ 		while(i < mList->size())
+ 		{
+@@ -384,6 +410,7 @@ void MenuComponent::onSizeChanged()
+ 	// update grid row/col sizes
+ 	mGrid.setRowHeight(0, TITLE_HEIGHT, false);
+ 	mGrid.setRowHeight(2, getButtonGridHeight(), false);
++	mGrid.setRowHeight(3, getFooterHeight(), false);
+ 
+ 	mGrid.setSize(mSize);
+ 
+diff --git a/es-core/src/components/MenuComponent.h b/es-core/src/components/MenuComponent.h
+index 60009492..2903e2ab 100644
+--- a/es-core/src/components/MenuComponent.h
++++ b/es-core/src/components/MenuComponent.h
+@@ -41,6 +41,9 @@ public:
+ 
+ 	void addButton(const std::string& label, const std::string& helpText, const std::function<void()>& callback);
+ 
++	// A line at the menu's bottom, under the list and the buttons (menufooter atBottom)
++	void setFooter(const std::string& text);
++
+ 	void setTitle(const std::string& title, const std::shared_ptr<Font>& font = nullptr);
+ 	void setSubTitle(const std::string& text);
+ 	void setTitleImage(std::shared_ptr<ImageComponent> titleImage, bool replaceTitle = false);
+@@ -61,6 +64,7 @@ public:
+ 	float getHeaderGridHeight() const;
+ 	float getTitleHeight() const;
+ 	float getButtonGridHeight() const;
++	float getFooterHeight() const;
+ 
+ 	void setMaxHeight(float maxHeight) 
+ 	{ 
+@@ -92,6 +96,8 @@ private:
+ 	std::shared_ptr<ComponentGrid> mButtonGrid;
+ 	std::vector< std::shared_ptr<ButtonComponent> > mButtons;
+ 
++	std::shared_ptr<TextComponent> mFooter;
++
+ 	float mMaxHeight;
+ };
+ 

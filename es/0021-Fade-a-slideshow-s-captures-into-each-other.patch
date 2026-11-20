@@ -1,0 +1,155 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 23:59:57 +0000
+Subject: [PATCH] Fade a slideshow's captures into each other
+
+- <transition>fade</transition> draws the next capture over the current
+  one, its opacity eased over <duration>; "slide" (from the right) stays the
+  default.
+---
+ THEMES.md                                     | 12 ++++++----
+ es-core/src/ThemeData.cpp                     |  3 ++-
+ es-core/src/components/SlideshowComponent.cpp | 23 ++++++++++++++-----
+ es-core/src/components/SlideshowComponent.h   |  9 ++++----
+ 4 files changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index bd1bc2f6..c06b0684 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1175,10 +1175,10 @@ Can be created as an extra, or in an `itemTemplate`.
+ Captures shown one at a time at whole-pixel scales: the smallest of 1/4, 1/2, 1, 2, 3 and 4 at which the
+ capture's region of interest covers the element, centred (on the capture's pixel grid at 2x and up), so pixel
+ art stays sharp. In a grid's item template it moves only on the selected item: every `interval` seconds the
+-next capture slides in from the right in `duration` seconds, and the other items show the first capture. It
+-stops under the screen saver, while the view is hidden and with the idle pause (Idle pause, below); a capture
+-that does not load (gone, not an image) is asked for once more, then skipped. Child elements (a screen filter, a
+-frame) are drawn over the captures, the dots over them.
++next capture slides in from the right (or fades in, `transition`) in `duration` seconds, and the other items
++show the first capture. It stops under the screen saver, while the view is hidden and with the idle pause (Idle
++pause, below); a capture that does not load (gone, not an image) is asked for once more, then skipped. Child
++elements (a screen filter, a frame) are drawn over the captures, the dots over them.
+ 
+ * `pos`, `size`, `x`, `y`, `w`, `h`, `origin`, `opacity`, `visible`, `zIndex` - as for `image`.
+ * `path` - type: STRING.
+@@ -1186,7 +1186,9 @@ frame) are drawn over the captures, the dots over them.
+ * `interval` - type: FLOAT.
+     - Seconds on each capture (default 4).
+ * `duration` - type: FLOAT.
+-    - Seconds of the slide to the next capture (default 0.6).
++    - Seconds of the change to the next capture (default 0.6).
++* `transition` - type: STRING.
++    - `slide` (from the right, the default) or `fade` (the next capture over the current one).
+ * `color` - type: COLOR.
+     - Multiplied with the captures (a Game Boy's green, say).
+ * `saturation` - type: FLOAT.
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 3e679058..f95cbce4 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -112,7 +112,8 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "origin", NORMALIZED_PAIR },
+ 		{ "path", STRING },					// the captures, one per line ({system:slides})
+ 		{ "interval", FLOAT },				// seconds on each capture
+-		{ "duration", FLOAT },				// seconds of the slide to the next one
++		{ "duration", FLOAT },				// seconds of the change to the next one
++		{ "transition", STRING },			// "slide" (from the right) or "fade"
+ 		{ "color", COLOR },
+ 		{ "saturation", FLOAT },
+ 		{ "roundCorners", FLOAT },
+diff --git a/es-core/src/components/SlideshowComponent.cpp b/es-core/src/components/SlideshowComponent.cpp
+index 40c9571f..28b9c921 100644
+--- a/es-core/src/components/SlideshowComponent.cpp
++++ b/es-core/src/components/SlideshowComponent.cpp
+@@ -10,7 +10,7 @@
+ #include "Window.h"
+ 
+ SlideshowComponent::SlideshowComponent(Window* window) : GuiComponent(window),
+-	mShown(0), mScreenSaverActive(false), mColor(0xFFFFFFFF), mSaturation(1.0f), mRoundCorners(0.0f), mRoi(0, 0, 1, 1),
++	mShown(0), mScreenSaverActive(false), mColor(0xFFFFFFFF), mSaturation(1.0f), mRoundCorners(0.0f), mRoi(0, 0, 1, 1), mFade(false),
+ 	mDots(false), mMaxDots(9), mDotSize(4.0f / 480.0f), mDotsOffset(9.0f / 640.0f, 9.0f / 480.0f),
+ 	mDotColor(0xFFFFFF55), mDotSelectedColor(0xFFFFFFD0)
+ {
+@@ -100,7 +100,7 @@ void SlideshowComponent::update(int deltaTime)
+ 		mNextTexture->reload();
+ }
+ 
+-void SlideshowComponent::drawSlide(const std::shared_ptr<TextureResource>& texture, float dx, const Transform4x4f& trans)
++void SlideshowComponent::drawSlide(const std::shared_ptr<TextureResource>& texture, float dx, const Transform4x4f& trans, float alpha)
+ {
+ 	if (texture == nullptr)
+ 		return;
+@@ -119,7 +119,7 @@ void SlideshowComponent::drawSlide(const std::shared_ptr<TextureResource>& textu
+ 	float r = x + fit.w;
+ 	float b = y + fit.h;
+ 
+-	float opacity = getOpacity() / 255.0f;
++	float opacity = getOpacity() / 255.0f * alpha;
+ 	const unsigned int color = Renderer::convertColor((mColor & 0xFFFFFF00) | (unsigned char)((mColor & 0xFF) * opacity));
+ 
+ 	Renderer::Vertex vertices[4];
+@@ -200,9 +200,17 @@ void SlideshowComponent::render(const Transform4x4f& parentTrans)
+ 	if (mClock.progress() >= 0 && mNextTexture != nullptr)
+ 	{
+ 		float t = SlideLayout::ease(mClock.progress());
+-		float dx = Math::round(t * mSize.x());
+-		drawSlide(mTexture, -dx, trans);
+-		drawSlide(mNextTexture, mSize.x() - dx, trans);
++		if (mFade)
++		{
++			drawSlide(mTexture, 0, trans);
++			drawSlide(mNextTexture, 0, trans, t);
++		}
++		else
++		{
++			float dx = Math::round(t * mSize.x());
++			drawSlide(mTexture, -dx, trans);
++			drawSlide(mNextTexture, mSize.x() - dx, trans);
++		}
+ 
+ 		if (t > 0.5f)
+ 			shown = mClock.next();
+@@ -263,6 +271,9 @@ void SlideshowComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, con
+ 
+ 	mClock.setTiming(interval, duration);
+ 
++	if (elem->has("transition"))
++		mFade = elem->get<std::string>("transition") == "fade";
++
+ 	if (elem->has("color"))
+ 		mColor = elem->get<unsigned int>("color");
+ 
+diff --git a/es-core/src/components/SlideshowComponent.h b/es-core/src/components/SlideshowComponent.h
+index e70c1e02..7678c88b 100644
+--- a/es-core/src/components/SlideshowComponent.h
++++ b/es-core/src/components/SlideshowComponent.h
+@@ -13,9 +13,9 @@ class TextureResource;
+ 
+ // <slideshow>: captures shown one at a time at whole-pixel scales (SlideLayout::fit). In a grid's item
+ // template it moves only on the selected item: every <interval> seconds the next capture slides in from
+-// the right in <duration> seconds, with dots for the position; the other items show the first capture.
+-// <path> lists the captures, one per line ("{system:slides}" on the system grid). It stops with the idle pause
+-// (Window::isIdlePaused).
++// the right (<transition> "slide") or fades in over the current one ("fade") in <duration> seconds, with
++// dots for the position; the other items show the first capture. <path> lists the captures, one per line
++// ("{system:slides}" on the system grid). It stops with the idle pause (Window::isIdlePaused).
+ class SlideshowComponent : public GuiComponent
+ {
+ public:
+@@ -40,7 +40,7 @@ public:
+ private:
+ 	bool isActive();
+ 	std::shared_ptr<TextureResource> loadTexture(const std::string& path);
+-	void drawSlide(const std::shared_ptr<TextureResource>& texture, float dx, const Transform4x4f& trans);
++	void drawSlide(const std::shared_ptr<TextureResource>& texture, float dx, const Transform4x4f& trans, float alpha = 1.0f);
+ 	void drawDots(int shown, const Transform4x4f& trans);
+ 
+ 	std::string mPathsValue;
+@@ -57,6 +57,7 @@ private:
+ 	float mSaturation;
+ 	float mRoundCorners;
+ 	Vector4f mRoi;
++	bool mFade;
+ 
+ 	bool mDots;
+ 	int mMaxDots;

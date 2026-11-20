@@ -1,0 +1,693 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:05:50 +0000
+Subject: [PATCH] Slide through captures on the selected item of a grid
+
+A new theme element, <slideshow>, shows captures one at a time at whole-pixel
+scales: the smallest of 1/4, 1/2, 1, 2, 3 and 4 at which the capture's region of
+interest (<roi>, fractions of the capture) covers the element, centred, and at 2x
+and up on the capture's pixel grid, so pixel art stays sharp and an LCD grid drawn
+over it lines up.
+
+In a grid's item template it moves only on the selected item: every <interval>
+seconds (4 by default) the next capture slides in from the right in <duration>
+seconds (0.6), loaded while the current one shows; the other items show the first
+capture, and an item that loses the selection goes back to it. Position dots
+(<dots>) show at most <maxDots> (9) in a window that follows the current capture,
+smaller at an end with more captures beyond. Child elements are drawn over the
+captures and the dots over them, so a card's frame or screen filter can sit
+between the two. <color> and <saturation> tint the captures; <roundCorners>
+clips them.
+
+<path> lists the captures, one per line, and can be bound. ES versions with the
+element support the theme feature "slideshow".
+---
+ THEMES.md                                     |  33 ++
+ es-core/CMakeLists.txt                        |   3 +
+ es-core/src/ThemeData.cpp                     |  30 +-
+ es-core/src/components/SlideLayout.h          | 104 ++++++
+ es-core/src/components/SlideshowComponent.cpp | 338 ++++++++++++++++++
+ es-core/src/components/SlideshowComponent.h   |  71 ++++
+ 6 files changed, 578 insertions(+), 1 deletion(-)
+ create mode 100644 es-core/src/components/SlideLayout.h
+ create mode 100644 es-core/src/components/SlideshowComponent.cpp
+ create mode 100644 es-core/src/components/SlideshowComponent.h
+
+diff --git a/THEMES.md b/THEMES.md
+index 0fd2fe4b..34bf5050 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1137,6 +1137,39 @@ Can be created as an extra.
+ 
+ EmulationStation borrows the concept of "nine patches" from Android (or "9-Slices"). Currently the implementation is very simple and hard-coded to only use 48x48px images (16x16px for each "patch"). Check the `data/resources` directory for some examples (button.png, frame.png).
+ 
++#### slideshow
++
++Can be created as an extra, or in an `itemTemplate`.
++
++Captures shown one at a time at whole-pixel scales: the smallest of 1/4, 1/2, 1, 2, 3 and 4 at which the
++capture's region of interest covers the element, centred (on the capture's pixel grid at 2x and up), so pixel
++art stays sharp. In a grid's item template it moves only on the selected item: every `interval` seconds the
++next capture slides in from the right in `duration` seconds, and the other items show the first capture. Child
++elements (a screen filter, a frame) are drawn over the captures, the dots over them.
++
++* `pos`, `size`, `x`, `y`, `w`, `h`, `origin`, `opacity`, `visible`, `zIndex` - as for `image`.
++* `path` - type: STRING.
++    - The captures, one path per line; usually bound: `{system:slides}`.
++* `interval` - type: FLOAT.
++    - Seconds on each capture (default 4).
++* `duration` - type: FLOAT.
++    - Seconds of the slide to the next capture (default 0.6).
++* `color` - type: COLOR.
++    - Multiplied with the captures (a Game Boy's green, say).
++* `saturation` - type: FLOAT.
++    - 0 (grey) to 1 (default).
++* `roundCorners` - type: FLOAT.
++    - Corner radius of the element: pixels, or a fraction of its size below 1.
++* `roi` - type: NORMALIZED_RECT.
++    - The part of each capture to centre, as fractions of it: x y w h (default 0 0 1 1; `0 0 1 0.5` for the
++      top screen of a DS capture).
++* `dots`, `maxDots`, `dotSize`, `dotsOffset`, `dotColor`, `dotSelectedColor` - BOOLEAN, FLOAT, FLOAT,
++  NORMALIZED_PAIR, COLOR, COLOR.
++    - The position dots, on the selected item only: at most `maxDots` (default 9) in a window that follows the
++      current capture, smaller at an end with more captures beyond. `dotSize` is a fraction of the screen height
++      (default 4 px at 480), `dotsOffset` the distance of the row from the element's top-right corner, as
++      fractions of the screen (default 9 px, 9 px). The current dot is wider.
++
+ #### rating
+ 
+ * `pos` - type: NORMALIZED_PAIR.
+diff --git a/es-core/CMakeLists.txt b/es-core/CMakeLists.txt
+index a0a01773..67543b04 100644
+--- a/es-core/CMakeLists.txt
++++ b/es-core/CMakeLists.txt
+@@ -63,6 +63,8 @@ set(CORE_HEADERS
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/DateTimeEditComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/HelpComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/GridTileComponent.h
++	${CMAKE_CURRENT_SOURCE_DIR}/src/components/SlideLayout.h
++	${CMAKE_CURRENT_SOURCE_DIR}/src/components/SlideshowComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/IList.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ImageComponent.h
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ImageGridComponent.h
+@@ -202,6 +204,7 @@ set(CORE_SOURCES
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/DateTimeEditComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/HelpComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/GridTileComponent.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/src/components/SlideshowComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/ImageComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/MenuComponent.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/src/components/NinePatchComponent.cpp
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 19669bc1..3e679058 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -13,6 +13,7 @@
+ #include "components/WebImageComponent.h"
+ #include "components/RatingComponent.h"
+ #include "components/RectangleComponent.h"
++#include "components/SlideshowComponent.h"
+ 
+ #include "utils/FileSystemUtil.h"
+ #include "utils/StringUtil.h"
+@@ -29,7 +30,7 @@
+ 
+ std::set<std::string> ThemeData::sSupportedItemTemplate { "imagegrid", "carousel", "gamecarousel", "textlist" };
+ std::set<std::string> ThemeData::sSupportedViews        { "system", "basic", "detailed", "grid", "video", "gamecarousel", "menu", "screen", "splash" };
+-std::set<std::string> ThemeData::sSupportedFeatures     { "video", "carousel", "gamecarousel", "z-index", "visible", "manufacturer", "systemtabs" };
++std::set<std::string> ThemeData::sSupportedFeatures     { "video", "carousel", "gamecarousel", "z-index", "visible", "manufacturer", "systemtabs", "slideshow" };
+ 
+ static std::set<std::string> _autoExtraTypes            { "stackpanel", "container", "screenshader", "clock", "networkIcon", "webimage", "batteryText", "batteryIcon", "rectangle" };
+ 
+@@ -101,6 +102,31 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "clipChildren", BOOLEAN },
+ 		{ "zIndex", FLOAT } } },
+ 
++	{ "slideshow", {
++		{ "pos", NORMALIZED_PAIR },
++		{ "size", NORMALIZED_PAIR },
++		{ "x", FLOAT },
++		{ "y", FLOAT },
++		{ "h", FLOAT },
++		{ "w", FLOAT },
++		{ "origin", NORMALIZED_PAIR },
++		{ "path", STRING },					// the captures, one per line ({system:slides})
++		{ "interval", FLOAT },				// seconds on each capture
++		{ "duration", FLOAT },				// seconds of the slide to the next one
++		{ "color", COLOR },
++		{ "saturation", FLOAT },
++		{ "roundCorners", FLOAT },
++		{ "roi", NORMALIZED_RECT },			// the part of a capture to centre, fractions of it: x y w h
++		{ "dots", BOOLEAN },
++		{ "maxDots", FLOAT },
++		{ "dotSize", FLOAT },				// fraction of the screen height
++		{ "dotsOffset", NORMALIZED_PAIR },	// from the top-right corner, fractions of the screen
++		{ "dotColor", COLOR },
++		{ "dotSelectedColor", COLOR },
++		{ "opacity", FLOAT },
++		{ "visible", BOOLEAN },
++		{ "zIndex", FLOAT } } },
++
+ 	{ "screenshader", {
+ 		{ "path", PATH },
+ 		{ "pos", NORMALIZED_PAIR },
+@@ -2165,6 +2191,8 @@ GuiComponent* ThemeData::createExtraComponent(Window* window, const ThemeElement
+ 		comp = new RatingComponent(window);
+ 	else if (elem.type == "rectangle")
+ 		comp = new RectangleComponent(window);
++	else if (elem.type == "slideshow")
++		comp = new SlideshowComponent(window);
+ 
+ 	if (comp != nullptr)
+ 	{
+diff --git a/es-core/src/components/SlideLayout.h b/es-core/src/components/SlideLayout.h
+new file mode 100644
+index 00000000..02595810
+--- /dev/null
++++ b/es-core/src/components/SlideLayout.h
+@@ -0,0 +1,104 @@
++#pragma once
++#ifndef ES_CORE_COMPONENTS_SLIDE_LAYOUT_H
++#define ES_CORE_COMPONENTS_SLIDE_LAYOUT_H
++
++#include <algorithm>
++#include <cmath>
++
++// Where SlideshowComponent draws a capture and which dots it shows. Free of ES types so it can be
++// tested alone.
++namespace SlideLayout
++{
++	struct Fit
++	{
++		float scale;
++		float x, y;		// the image's top-left corner in the box
++		float w, h;		// the image's drawn size
++	};
++
++	// The capture at the smallest of 1/4, 1/2, 1, 2, 3 and 4 at which its region of interest (fractions of
++	// the image) covers the box, else at the exact factor that does. The region is centred, the image
++	// covers the box, and its corner is on whole pixels; at 2x and up it is on the grid of the capture's
++	// pixels from the box's corner, so an LCD grid drawn on that grid lines up with them.
++	inline Fit fit(float imageW, float imageH, float roiX, float roiY, float roiW, float roiH, float boxW, float boxH)
++	{
++		Fit out = { 1.0f, 0.0f, 0.0f, imageW, imageH };
++		if (imageW <= 0 || imageH <= 0 || boxW <= 0 || boxH <= 0 || roiW <= 0 || roiH <= 0)
++			return out;
++
++		float rw = imageW * roiW;
++		float rh = imageH * roiH;
++		float need = std::max(boxW / rw, boxH / rh);
++
++		static const float scales[] = { 0.25f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f };
++		float scale = need;
++		for (float s : scales)
++		{
++			if (s >= need - 0.0001f)
++			{
++				scale = s;
++				break;
++			}
++		}
++
++		out.scale = scale;
++		out.w = imageW * scale;
++		out.h = imageH * scale;
++
++		float x = boxW / 2.0f - (imageW * roiX + rw / 2.0f) * scale;
++		float y = boxH / 2.0f - (imageH * roiY + rh / 2.0f) * scale;
++
++		// Cover the box: no edge of the image inside it
++		x = std::min(0.0f, std::max(boxW - out.w, x));
++		y = std::min(0.0f, std::max(boxH - out.h, y));
++
++		float step = (scale >= 2.0f && scale == std::floor(scale)) ? scale : 1.0f;
++		auto snap = [step](float v, float lowest)
++		{
++			float s = std::round(v / step) * step;
++			if (s > 0.0f)
++				s -= step;
++			if (s < lowest)
++				s += step;
++			return (s > 0.0f || s < lowest) ? std::round(v) : s;
++		};
++
++		out.x = snap(x, boxW - out.w);
++		out.y = snap(y, boxH - out.h);
++		return out;
++	}
++
++	struct Dots
++	{
++		int first;			// the first dot's slide
++		int count;			// how many dots
++		bool moreBefore;	// slides before the first dot (it is drawn smaller)
++		bool moreAfter;		// slides after the last one
++	};
++
++	// At most maxDots, in a window that keeps the current slide in the middle where it can
++	inline Dots dots(int total, int current, int maxDots)
++	{
++		Dots out = { 0, std::max(0, total), false, false };
++		if (maxDots <= 0 || total <= maxDots)
++			return out;
++
++		int first = current - maxDots / 2;
++		first = std::max(0, std::min(total - maxDots, first));
++
++		out.first = first;
++		out.count = maxDots;
++		out.moreBefore = first > 0;
++		out.moreAfter = first + maxDots < total;
++		return out;
++	}
++
++	// The slide's ease (in and out)
++	inline float ease(float t)
++	{
++		t = std::max(0.0f, std::min(1.0f, t));
++		return t < 0.5f ? 2.0f * t * t : 1.0f - (-2.0f * t + 2.0f) * (-2.0f * t + 2.0f) / 2.0f;
++	}
++}
++
++#endif // ES_CORE_COMPONENTS_SLIDE_LAYOUT_H
+diff --git a/es-core/src/components/SlideshowComponent.cpp b/es-core/src/components/SlideshowComponent.cpp
+new file mode 100644
+index 00000000..58079c26
+--- /dev/null
++++ b/es-core/src/components/SlideshowComponent.cpp
+@@ -0,0 +1,338 @@
++#include "components/SlideshowComponent.h"
++
++#include "components/GridTileComponent.h"
++#include "components/SlideLayout.h"
++#include "renderers/Renderer.h"
++#include "resources/TextureResource.h"
++#include "utils/StringUtil.h"
++#include "ImageIO.h"
++#include "ThemeData.h"
++
++SlideshowComponent::SlideshowComponent(Window* window) : GuiComponent(window),
++	mCurrent(0), mElapsed(0), mProgress(-1.0f), mScreenSaverActive(false),
++	mInterval(4000), mDuration(600), mColor(0xFFFFFFFF), mSaturation(1.0f), mRoundCorners(0.0f), mRoi(0, 0, 1, 1),
++	mDots(false), mMaxDots(9), mDotSize(4.0f / 480.0f), mDotsOffset(9.0f / 640.0f, 9.0f / 480.0f),
++	mDotColor(0xFFFFFF55), mDotSelectedColor(0xFFFFFFD0)
++{
++}
++
++SlideshowComponent::~SlideshowComponent()
++{
++}
++
++void SlideshowComponent::setPaths(const std::string& paths)
++{
++	if (paths == mPathsValue)
++		return;
++
++	mPathsValue = paths;
++	mPaths.clear();
++
++	for (auto line : Utils::String::split(paths, '\n', true))
++	{
++		line = Utils::String::trim(line);
++		if (!line.empty())
++			mPaths.push_back(line);
++	}
++
++	mTexture = nullptr;
++	rewind();
++}
++
++// The first capture again, waiting a whole interval
++void SlideshowComponent::rewind()
++{
++	if (mCurrent != 0)
++		mTexture = nullptr;
++
++	mCurrent = 0;
++	mElapsed = 0;
++	mProgress = -1.0f;
++	mNextTexture = nullptr;
++}
++
++// Moves on the selected item of a grid only; anywhere else, always
++bool SlideshowComponent::isActive()
++{
++	auto tile = dynamic_cast<GridTileComponent*>(getParent());
++	return tile == nullptr || tile->isSelected();
++}
++
++std::shared_ptr<TextureResource> SlideshowComponent::loadTexture(const std::string& path)
++{
++	// Smoothed only when the capture is drawn smaller than its pixels
++	unsigned int w = 0, h = 0;
++	bool linear = false;
++	if (ImageIO::loadImageSize(path, &w, &h) && w > 0 && h > 0)
++		linear = SlideLayout::fit((float)w, (float)h, mRoi.x(), mRoi.y(), mRoi.z(), mRoi.w(), mSize.x(), mSize.y()).scale < 1.0f;
++
++	return TextureResource::get(path, false, linear);
++}
++
++void SlideshowComponent::update(int deltaTime)
++{
++	GuiComponent::update(deltaTime);
++
++	if (!mVisible || mPaths.size() < 2)
++		return;
++
++	if (!isActive())
++	{
++		if (mCurrent != 0 || mProgress >= 0 || mElapsed != 0)
++			rewind();
++
++		return;
++	}
++
++	if (mScreenSaverActive || !isShowing())
++		return;
++
++	int next = (mCurrent + 1) % (int)mPaths.size();
++
++	if (mProgress < 0)
++	{
++		mElapsed += deltaTime;
++
++		// The next capture loads while this one shows
++		if (mNextTexture == nullptr)
++		{
++			mNextTexture = loadTexture(mPaths[next]);
++			if (mNextTexture != nullptr)
++				mNextTexture->reload();
++		}
++
++		if (mElapsed >= mInterval && mNextTexture != nullptr && mNextTexture->isLoaded())
++			mProgress = 0.0f;
++
++		return;
++	}
++
++	mProgress += (float)deltaTime / (float)std::max(1, mDuration);
++	if (mProgress >= 1.0f)
++	{
++		mCurrent = next;
++		mTexture = mNextTexture;
++		mNextTexture = nullptr;
++		mProgress = -1.0f;
++		mElapsed = 0;
++	}
++}
++
++void SlideshowComponent::drawSlide(const std::shared_ptr<TextureResource>& texture, float dx, const Transform4x4f& trans)
++{
++	if (texture == nullptr)
++		return;
++
++	auto size = texture->getPhysicalSize();
++	if (size.x() <= 0 || size.y() <= 0)
++		return;
++
++	if (!texture->bind())
++		return;
++
++	auto fit = SlideLayout::fit(size.x(), size.y(), mRoi.x(), mRoi.y(), mRoi.z(), mRoi.w(), mSize.x(), mSize.y());
++
++	float x = fit.x + dx;
++	float y = fit.y;
++	float r = x + fit.w;
++	float b = y + fit.h;
++
++	float opacity = getOpacity() / 255.0f;
++	const unsigned int color = Renderer::convertColor((mColor & 0xFFFFFF00) | (unsigned char)((mColor & 0xFF) * opacity));
++
++	Renderer::Vertex vertices[4];
++	vertices[0] = { { x, y }, { 0.0f, 1.0f }, color };
++	vertices[1] = { { x, b }, { 0.0f, 0.0f }, color };
++	vertices[2] = { { r, y }, { 1.0f, 1.0f }, color };
++	vertices[3] = { { r, b }, { 1.0f, 0.0f }, color };
++	vertices[0].saturation = mSaturation;
++
++	Renderer::setMatrix(trans);
++	Renderer::drawTriangleStrips(&vertices[0], 4);
++}
++
++void SlideshowComponent::drawDots(int shown, const Transform4x4f& trans)
++{
++	int total = (int)mPaths.size();
++	auto window = SlideLayout::dots(total, shown, mMaxDots);
++
++	float dot = Math::max(1.0f, Math::round(mDotSize * Renderer::getScreenHeight()));
++	float gap = Math::round(dot * 0.75f);
++	float wide = dot * 2.5f;
++
++	// Right-aligned at the offset from the top-right corner, the current dot wider; at the ends of a
++	// window with more slides beyond, the dot is smaller
++	float right = mSize.x() - Math::round(mDotsOffset.x() * Renderer::getScreenWidth());
++	float top = Math::round(mDotsOffset.y() * Renderer::getScreenHeight());
++
++	float x = right;
++	Renderer::setMatrix(trans);
++
++	for (int i = window.first + window.count - 1; i >= window.first; i--)
++	{
++		bool current = i == shown;
++		bool small = !current && ((i == window.first && window.moreBefore) || (i == window.first + window.count - 1 && window.moreAfter));
++
++		float h = small ? Math::max(1.0f, Math::round(dot * 0.6f)) : dot;
++		float w = current ? wide : h;
++		x -= w;
++
++		unsigned int color = current ? mDotSelectedColor : mDotColor;
++		unsigned char alpha = (unsigned char)((color & 0xFF) * (getOpacity() / 255.0f));
++		Renderer::drawSolidRectangle(x, top + (dot - h) / 2.0f, w, h, (color & 0xFFFFFF00) | alpha, 0, 0, h / 2.0f);
++
++		x -= gap;
++	}
++}
++
++void SlideshowComponent::render(const Transform4x4f& parentTrans)
++{
++	if (!mVisible || getOpacity() == 0)
++		return;
++
++	Transform4x4f trans = parentTrans * getTransform();
++
++	auto rect = Renderer::getScreenRect(trans, mSize);
++	if (!Renderer::isVisibleOnScreen(rect))
++		return;
++
++	// The children (a screen filter, the card art) go over the captures, the dots over them
++	if (mPaths.empty())
++	{
++		GuiComponent::renderChildren(trans);
++		return;
++	}
++
++	if (mCurrent >= (int)mPaths.size())
++		mCurrent = 0;
++
++	if (mTexture == nullptr)
++		mTexture = loadTexture(mPaths[mCurrent]);
++
++	// Everything inside the box, its corners rounded
++	Renderer::setMatrix(trans);
++	if (mRoundCorners > 0)
++		Renderer::enableRoundCornerStencil(0, 0, mSize.x(), mSize.y(), mRoundCorners < 1 ? Math::max(mSize.x(), mSize.y()) * mRoundCorners : mRoundCorners);
++	else
++		Renderer::pushClipRect(Vector2i((int)rect.x, (int)rect.y), Vector2i((int)rect.w, (int)rect.h));
++
++	int shown = mCurrent;
++	if (mProgress >= 0 && mNextTexture != nullptr)
++	{
++		float t = SlideLayout::ease(mProgress);
++		float dx = Math::round(t * mSize.x());
++		drawSlide(mTexture, -dx, trans);
++		drawSlide(mNextTexture, mSize.x() - dx, trans);
++
++		if (t > 0.5f)
++			shown = (mCurrent + 1) % (int)mPaths.size();
++	}
++	else
++		drawSlide(mTexture, 0, trans);
++
++	Renderer::bindTexture(0);
++
++	if (mRoundCorners > 0)
++		Renderer::disableStencil();
++	else
++		Renderer::popClipRect();
++
++	GuiComponent::renderChildren(trans);
++
++	if (mDots && mPaths.size() > 1 && isActive())
++		drawDots(shown, trans);
++}
++
++void SlideshowComponent::onHide()
++{
++	GuiComponent::onHide();
++
++	// Back on the first capture next time, and nothing kept loaded for a hidden view
++	rewind();
++	mTexture = nullptr;
++}
++
++void SlideshowComponent::onScreenSaverActivate()
++{
++	GuiComponent::onScreenSaverActivate();
++	mScreenSaverActive = true;
++}
++
++void SlideshowComponent::onScreenSaverDeactivate()
++{
++	GuiComponent::onScreenSaverDeactivate();
++	mScreenSaverActive = false;
++}
++
++void SlideshowComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, const std::string& view, const std::string& element, unsigned int properties)
++{
++	const ThemeData::ThemeElement* elem = theme->getElement(view, element, getThemeTypeName());
++	if (!elem)
++		return;
++
++	GuiComponent::applyTheme(theme, view, element, properties);
++
++	if (elem->has("interval"))
++		mInterval = (int)(Math::max(0.5f, elem->get<float>("interval")) * 1000.0f);
++
++	if (elem->has("duration"))
++		mDuration = (int)(Math::max(0.0f, elem->get<float>("duration")) * 1000.0f);
++
++	if (elem->has("color"))
++		mColor = elem->get<unsigned int>("color");
++
++	if (elem->has("saturation"))
++		mSaturation = Math::clamp(elem->get<float>("saturation"), 0.0f, 1.0f);
++
++	if (elem->has("roundCorners"))
++		mRoundCorners = elem->get<float>("roundCorners");
++
++	if (elem->has("roi"))
++	{
++		auto roi = elem->get<Vector4f>("roi");
++		if (roi.z() > 0 && roi.w() > 0)
++			mRoi = roi;
++	}
++
++	if (elem->has("dots"))
++		mDots = elem->get<bool>("dots");
++
++	if (elem->has("maxDots"))
++		mMaxDots = Math::max(1, (int)elem->get<float>("maxDots"));
++
++	if (elem->has("dotSize"))
++		mDotSize = elem->get<float>("dotSize");
++
++	if (elem->has("dotsOffset"))
++		mDotsOffset = elem->get<Vector2f>("dotsOffset");
++
++	if (elem->has("dotColor"))
++		mDotColor = elem->get<unsigned int>("dotColor");
++
++	if (elem->has("dotSelectedColor"))
++		mDotSelectedColor = elem->get<unsigned int>("dotSelectedColor");
++
++	if (elem->has("path"))
++		setPaths(elem->get<std::string>("path"));
++}
++
++ThemeData::ThemeElement::Property SlideshowComponent::getProperty(const std::string name)
++{
++	if (name == "path")
++		return mPathsValue;
++
++	if (name == "saturation")
++		return mSaturation;
++
++	return GuiComponent::getProperty(name);
++}
++
++void SlideshowComponent::setProperty(const std::string name, const ThemeData::ThemeElement::Property& value)
++{
++	if (name == "path" && value.type == ThemeData::ThemeElement::Property::PropertyType::String)
++		setPaths(value.s);
++	else if (name == "saturation" && value.type == ThemeData::ThemeElement::Property::PropertyType::Float)
++		mSaturation = Math::clamp(value.f, 0.0f, 1.0f);
++	else
++		GuiComponent::setProperty(name, value);
++}
+diff --git a/es-core/src/components/SlideshowComponent.h b/es-core/src/components/SlideshowComponent.h
+new file mode 100644
+index 00000000..92478ad7
+--- /dev/null
++++ b/es-core/src/components/SlideshowComponent.h
+@@ -0,0 +1,71 @@
++#pragma once
++#ifndef ES_CORE_COMPONENTS_SLIDESHOW_COMPONENT_H
++#define ES_CORE_COMPONENTS_SLIDESHOW_COMPONENT_H
++
++#include "GuiComponent.h"
++#include "math/Vector4f.h"
++#include <memory>
++#include <string>
++#include <vector>
++
++class TextureResource;
++
++// <slideshow>: captures shown one at a time at whole-pixel scales (SlideLayout::fit). In a grid's item
++// template it moves only on the selected item: every <interval> seconds the next capture slides in from
++// the right in <duration> seconds, with dots for the position; the other items show the first capture.
++// <path> lists the captures, one per line ("{system:slides}" on the system grid).
++class SlideshowComponent : public GuiComponent
++{
++public:
++	SlideshowComponent(Window* window);
++	~SlideshowComponent();
++
++	std::string getThemeTypeName() override { return "slideshow"; }
++
++	void applyTheme(const std::shared_ptr<ThemeData>& theme, const std::string& view, const std::string& element, unsigned int properties) override;
++	void update(int deltaTime) override;
++	void render(const Transform4x4f& parentTrans) override;
++
++	void onHide() override;
++	void onScreenSaverActivate() override;
++	void onScreenSaverDeactivate() override;
++
++	ThemeData::ThemeElement::Property getProperty(const std::string name) override;
++	void setProperty(const std::string name, const ThemeData::ThemeElement::Property& value) override;
++
++	void setPaths(const std::string& paths);
++
++private:
++	bool isActive();
++	void rewind();
++	std::shared_ptr<TextureResource> loadTexture(const std::string& path);
++	void drawSlide(const std::shared_ptr<TextureResource>& texture, float dx, const Transform4x4f& trans);
++	void drawDots(int shown, const Transform4x4f& trans);
++
++	std::string mPathsValue;
++	std::vector<std::string> mPaths;
++
++	int mCurrent;
++	int mElapsed;
++	float mProgress;	// of the slide to the next capture, 0 to 1; -1 while waiting
++	bool mScreenSaverActive;
++
++	std::shared_ptr<TextureResource> mTexture;
++	std::shared_ptr<TextureResource> mNextTexture;
++
++	int mInterval;
++	int mDuration;
++	unsigned int mColor;
++	float mSaturation;
++	float mRoundCorners;
++	Vector4f mRoi;
++
++	bool mDots;
++	int mMaxDots;
++	float mDotSize;
++	Vector2f mDotsOffset;
++	unsigned int mDotColor;
++	unsigned int mDotSelectedColor;
++};
++
++#endif // ES_CORE_COMPONENTS_SLIDESHOW_COMPONENT_H

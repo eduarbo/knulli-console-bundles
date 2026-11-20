@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 15:01:03 +0000
+Subject: [PATCH] Let a theme set how long a video comes in over its snapshot
+
+A video fades in over its snapshot in 400 ms; a grid tile's also grows
+from the middle ("size", the tiles' default effect). The video
+element's fadeTime sets the fade's length in seconds; with effect
+"none" it is a plain crossfade at the snapshot's place. keepOrientation
+is now only taken from a theme that sets it, so a tile's own orientation
+setting is not reset when the theme styles the tile's video.
+---
+ THEMES.md                                 |  2 ++
+ es-core/src/ThemeData.cpp                 |  1 +
+ es-core/src/components/VideoComponent.cpp | 14 ++++++++++----
+ es-core/src/components/VideoComponent.h   |  2 ++
+ 4 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 16514ff2..3a4291aa 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1041,6 +1041,8 @@ is read again 30 seconds later; after three such timeouts it counts as no video
+ 	- The video will be resized as large as possible so that it fits within this size and maintains its aspect ratio.  Use this instead of `size` when you don't know what kind of video you're using so it doesn't get grossly oversized on one axis (e.g. with a game's video metadata).
+ * `keepOrientation` - type: BOOLEAN.
+ 	- With `size`: a video (and its snapshot) turned the other way than the size keeps its orientation: it takes the size's shape turned (a TV game's 4:3, an upright one's 3:4), centred.  Default is false.
++* `fadeTime` - type: FLOAT.
++	- Seconds the video takes to come in over its snapshot (with `effect` none, a crossfade in place; on a grid tile's `gridtile.video` too).  Default is 0.4.
+ * `origin` - type: NORMALIZED_PAIR.
+ 	- Where on the image `pos` refers to.  For example, an origin of `0.5 0.5` and a `pos` of `0.5 0.5` would place the image exactly in the middle of the screen.  If the "POSITION" and "SIZE" attributes are themable, "ORIGIN" is implied.
+ * `rotation` - type: FLOAT.
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 73e98b8f..b9fa3150 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -587,6 +587,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "maxSize", NORMALIZED_PAIR },
+ 		{ "minSize", NORMALIZED_PAIR },
+ 		{ "keepOrientation", BOOLEAN },			// with size: a video or snapshot turned the other way keeps its orientation
++		{ "fadeTime", FLOAT },					// seconds the video takes to come in over its snapshot (0.4)
+ 		{ "default", PATH },
+ 		{ "path", PATH },
+ 		{ "delay", FLOAT },
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 8b0c5df3..85408113 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -1,4 +1,5 @@
+ #include "components/VideoComponent.h"
++#include <algorithm>
+ 
+ #include "resources/ResourceManager.h"
+ #include "utils/FileSystemUtil.h"
+@@ -318,7 +319,12 @@ void VideoComponent::applyTheme(const std::shared_ptr<ThemeData>& theme, const s
+ 		Vector2f scale = Vector2f(clientRectangle.z(), clientRectangle.w());
+ 
+ 		// A size's shape, turned to the video's (or the snapshot's) orientation (a TV game's 4:3, 3:4 upright)
+-		setKeepOrientation(elem->has("keepOrientation") && elem->get<bool>("keepOrientation"));
++		if (elem->has("keepOrientation"))
++			setKeepOrientation(elem->get<bool>("keepOrientation"));
++
++		// How long the video takes to come in over its snapshot, a crossfade
++		if (elem->has("fadeTime"))
++			mFadeTimeMs = std::max(1, (int)(elem->get<float>("fadeTime") * 1000.0f));
+ 
+ 		if (elem->has("size"))
+ 		{
+@@ -517,9 +523,9 @@ void VideoComponent::update(int deltaTime)
+ 			if (mStartTime > ticks)
+ 			{
+ 				Uint32 diff = mStartTime - ticks;
+-				if (diff < FADE_TIME_MS)
++				if (diff < (Uint32)mFadeTimeMs)
+ 				{
+-					mFadeIn = (float)diff / (float)FADE_TIME_MS;
++					mFadeIn = (float)diff / (float)mFadeTimeMs;
+ 					return;
+ 				}
+ 			}
+@@ -528,7 +534,7 @@ void VideoComponent::update(int deltaTime)
+ 		// If the fade in is less than 1 then increment it
+ 		if (mFadeIn < 1.0f)
+ 		{
+-			mFadeIn += deltaTime / (float)FADE_TIME_MS;
++			mFadeIn += deltaTime / (float)mFadeTimeMs;
+ 			if (mFadeIn > 1.0f)
+ 				mFadeIn = 1.0f;
+ 		}
+diff --git a/es-core/src/components/VideoComponent.h b/es-core/src/components/VideoComponent.h
+index 3eed3634..9bf4f6d8 100644
+--- a/es-core/src/components/VideoComponent.h
++++ b/es-core/src/components/VideoComponent.h
+@@ -231,6 +231,8 @@ protected:
+ 	bool							mTargetIsMin;
+ 	bool							mKeepOrientation;
+ 	bool							mInView = true;
++	// how long the video takes to come in over its snapshot (the theme's fadeTime)
++	int								mFadeTimeMs = 400;
+ 
+ 	bool							mIsWaitingForVideoToStart;
+ 

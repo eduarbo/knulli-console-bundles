@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 17:09:52 +0000
+Subject: [PATCH] Apply default metadata values sent to /addgames for existing
+ games
+
+MetaDataList::loadFromXML skips every value equal to its default. That
+is fine when a gamelist is parsed into new FileData, but /addgames
+reuses the existing FileData, so values that reset a field are dropped:
+posting <favorite>false</favorite> or <lastplayed>0</lastplayed> for a
+game that is a favorite, or has been played, does nothing.
+
+Only skip a default value when the field is not set yet. Empty values are
+still skipped, so partial entries do not clear other fields.
+Startup parsing is unchanged: new FileData has no fields set, and
+gamelist recovery files never contain default values.
+---
+ es-app/src/MetaData.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/es-app/src/MetaData.cpp b/es-app/src/MetaData.cpp
+index c5cb3478..1adbf1b8 100644
+--- a/es-app/src/MetaData.cpp
++++ b/es-app/src/MetaData.cpp
+@@ -210,7 +210,9 @@ void MetaDataList::loadFromXML(MetaDataListType type, pugi::xml_node& node, Syst
+ 		if (mdd.id == MetaDataId::GenreIds)
+ 			continue;
+ 
+-		if (value == mdd.defaultValue)
++		// Skip default values, unless they replace a value that is already set
++		// (e.g. favorite=false or lastplayed=0 sent to /addgames for an existing game)
++		if (value == mdd.defaultValue && (value.empty() || mMap.find(mdd.id) == mMap.cend()))
+ 			continue;
+ 
+ 		if (mdd.type == MD_BOOL)

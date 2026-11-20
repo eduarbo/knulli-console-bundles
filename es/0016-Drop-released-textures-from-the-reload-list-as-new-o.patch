@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 19:02:18 +0000
+Subject: [PATCH] Drop released textures from the reload list as new ones come
+
+Each new texture adds an entry to ResourceManager's reload list, and entries
+of released textures were only dropped on the next unload or reload of every
+resource, which happens when a game starts. A view that keeps making new
+textures for as long as it shows (a slideshow) grew the list all that time.
+Expired entries are now dropped every 64 additions.
+---
+ es-core/src/resources/ResourceManager.cpp | 10 +++++++++-
+ es-core/src/resources/ResourceManager.h   |  1 +
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/es-core/src/resources/ResourceManager.cpp b/es-core/src/resources/ResourceManager.cpp
+index 2802dfae..e159625b 100644
+--- a/es-core/src/resources/ResourceManager.cpp
++++ b/es-core/src/resources/ResourceManager.cpp
+@@ -14,7 +14,7 @@ auto array_deleter = [](unsigned char* p) { delete[] p; };
+ 
+ std::shared_ptr<ResourceManager> ResourceManager::sInstance = nullptr;
+ 
+-ResourceManager::ResourceManager()
++ResourceManager::ResourceManager() : mAddedSincePrune(0)
+ {
+ }
+ 
+@@ -224,6 +224,14 @@ void ResourceManager::reloadAll()
+ 
+ void ResourceManager::addReloadable(std::weak_ptr<IReloadable> reloadable)
+ {
++	// Released textures stay listed until the next unload or reload (a game launch); a view that keeps making
++	// new ones (a slideshow) would grow the list for as long as it shows, so drop them every 64 additions
++	if (++mAddedSincePrune >= 64)
++	{
++		mAddedSincePrune = 0;
++		mReloadables.remove_if([](const std::shared_ptr<ReloadableInfo>& info) { return info->data.expired(); });
++	}
++
+ 	std::shared_ptr<ReloadableInfo> info = std::make_shared<ReloadableInfo>();
+ 	info->data = reloadable;
+ 	info->reload = false;
+diff --git a/es-core/src/resources/ResourceManager.h b/es-core/src/resources/ResourceManager.h
+index e5b714bc..7ec18819 100644
+--- a/es-core/src/resources/ResourceManager.h
++++ b/es-core/src/resources/ResourceManager.h
+@@ -59,6 +59,7 @@ private:
+ 	};
+ 
+ 	std::list<std::shared_ptr<ReloadableInfo>> mReloadables;
++	int mAddedSincePrune;
+ };
+ 
+ #endif // ES_CORE_RESOURCES_RESOURCE_MANAGER_H

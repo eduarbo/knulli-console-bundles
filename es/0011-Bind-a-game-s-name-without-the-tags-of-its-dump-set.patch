@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 08:46:21 +0000
+Subject: [PATCH] Bind a game's name without the tags of its dump set
+
+Game names often come as a dump set or a scraper writes them: "Some
+Game (USA)", "Some Game (Europe) (En,Fr,De) (Rev 1)", "Title : Subtitle".
+The tags are for telling dumps apart, not for reading.
+
+Add Utils::String::cleanTitle and {game:cleanName}: the name with its
+trailing dump-set tags dropped, one at a time from the end, while the
+whole tag is one: regions and languages (No-Intro codes and names,
+joined with "," or "+"), "Rev X", "vX.Y", "Version X", Beta, Proto,
+Demo, Sample, Unl, Alt, SGB Enhanced, GB Compatible, arcade date codes
+(World 910522) and GoodTools codes ([!], [b1], [T+Eng]). Then " : "
+becomes ": ". Other parentheses stay ("Game (Special Edition)",
+"Game (ABC-1234)"), and so does a name that is only a tag. The stored
+name is not touched.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ THEMES_BINDINGS.md               |  1 +
+ es-app/src/FileData.cpp          |  3 +
+ es-core/src/utils/StringUtil.cpp | 94 ++++++++++++++++++++++++++++++++
+ es-core/src/utils/StringUtil.h   |  1 +
+ 4 files changed, 99 insertions(+)
+
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index eefdcc12..e6969bbd 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -130,6 +130,7 @@ type                        string
+ stars                       string                returns a string composed of rating stars
+ nameShort                   string                name, before any parenthesis
+ nameExtra                   string                name, after any parenthesis
++cleanName                   string                name without the trailing tags of dump sets: (USA), (En,Fr), (Rev 1), (v1.1), (Beta), [!]...; " : " as ": "
+ ```
+ 
+ **global:**
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index 679477e1..bd5c751a 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -1822,6 +1822,9 @@ BindableProperty FileData::getProperty(const std::string& name)
+ 		return name;
+ 	}
+ 
++	if (name == "cleanName")
++		return Utils::String::cleanTitle(getName());
++
+ 	if (name == "nameExtra")
+ 	{
+ 		auto name = getName();
+diff --git a/es-core/src/utils/StringUtil.cpp b/es-core/src/utils/StringUtil.cpp
+index c3f4d65e..0f643e69 100644
+--- a/es-core/src/utils/StringUtil.cpp
++++ b/es-core/src/utils/StringUtil.cpp
+@@ -418,6 +418,100 @@ namespace Utils
+ 
+ 		} // trim
+ 
++		// A word of a dump set's tag: a region, a language (name or No-Intro code) or a date code
++		static bool isTitleTagWord(const std::string& word)
++		{
++			static const std::vector<std::string> words = {
++				"usa", "us", "u", "europe", "eu", "e", "japan", "jp", "j", "world", "w", "asia", "australia", "brazil",
++				"canada", "china", "france", "germany", "hong", "kong", "italy", "korea", "netherlands", "spain", "sweden",
++				"taiwan", "uk", "scandinavia", "russia", "mexico", "latin", "america", "pal", "ntsc", "unknown",
++				"english", "japanese", "french", "german", "spanish", "italian", "portuguese", "dutch", "swedish",
++				"en", "ja", "fr", "de", "es", "it", "nl", "pt", "sv", "no", "da", "fi", "zh", "ko", "ru", "pl" };
++
++			if (std::find(words.cbegin(), words.cend(), word) != words.cend())
++				return true;
++
++			// languages joined with "+" (En+Fr), version numbers (v1.1, v1.01b), arcade date codes (910522)
++			if (word.find('+') != std::string::npos)
++			{
++				for (auto part : split(word, '+', true))
++					if (!isTitleTagWord(part))
++						return false;
++
++				return true;
++			}
++
++			auto digits = [](const std::string& s, size_t from) { return from < s.size() && s.find_first_not_of("0123456789.", from) >= s.size() - 1 && isdigit(s[from]); };
++			if (word.size() > 1 && word[0] == 'v' && digits(word, 1))
++				return true;
++
++			return word.size() == 6 && word.find_first_not_of("0123456789") == std::string::npos;
++		}
++
++		// The text of one (...) or [...] tag of a dump set: region, languages, revision, version, status
++		static bool isTitleTag(const std::string& tag)
++		{
++			static const std::vector<std::string> status = {
++				"beta", "proto", "prototype", "demo", "sample", "unl", "alt", "kiosk", "debug", "sgb enhanced",
++				"gb compatible", "rumble version", "virtual console", "!" };
++
++			auto items = split(toLower(tag), ',', true);
++			if (items.empty())
++				return false;
++
++			for (auto item : items)
++			{
++				item = trim(item);
++				if (item.empty())
++					return false;
++
++				// "Rev 1", "Rev A", "Revision 2", "Version 1.1", "Beta 2", "Alt 1"
++				auto words = split(item, ' ', true);
++				if (words.size() == 2 && (words[0] == "rev" || words[0] == "revision" || words[0] == "version" || words[0] == "ver" ||
++					((words[0] == "beta" || words[0] == "proto" || words[0] == "alt" || words[0] == "demo") && isdigit(words[1][0]))))
++					continue;
++
++				if (std::find(status.cbegin(), status.cend(), item) != status.cend())
++					continue;
++
++				// GoodTools codes: [a1], [b2], [h1], [o1], [f1], [p1], [t1], [T+Eng]
++				if (item.size() <= 3 && strchr("abfhopt", item[0]) && item.find_first_not_of("0123456789", 1) == std::string::npos)
++					continue;
++
++				if (item.size() > 2 && item[0] == 't' && (item[1] == '+' || item[1] == '-'))
++					continue;
++
++				bool all = true;
++				for (auto word : words)
++					all = all && isTitleTagWord(word);
++
++				if (!all)
++					return false;
++			}
++
++			return true;
++		}
++
++		// A game's name for display: the trailing tags of dump sets dropped, (USA), (En,Fr), (Rev 1), (v1.1),
++		// (Beta), [!]..., and " : " written ": ". Other parentheses stay ("Game (Special Edition)").
++		std::string cleanTitle(const std::string& _string)
++		{
++			std::string name = trim(_string);
++
++			while (name.size() > 2 && (name.back() == ')' || name.back() == ']'))
++			{
++				char open = name.back() == ')' ? '(' : '[';
++				size_t start = name.rfind(open);
++				if (start == std::string::npos || start == 0 || !isTitleTag(name.substr(start + 1, name.size() - start - 2)))
++					break;
++
++				name = trim(name.substr(0, start));
++			}
++
++			name = replace(name, " : ", ": ");
++			return name.empty() ? trim(_string) : name;
++		}
++
+ 		std::string replace(const std::string& _string, const std::string& _replace, const std::string& _with)
+ 		{
+ 			if (_replace.empty())
+diff --git a/es-core/src/utils/StringUtil.h b/es-core/src/utils/StringUtil.h
+index 79271119..62d30320 100644
+--- a/es-core/src/utils/StringUtil.h
++++ b/es-core/src/utils/StringUtil.h
+@@ -24,6 +24,7 @@ namespace Utils
+ 		bool         startsWith         (const std::string& _string, const std::string& _start);
+ 		bool         endsWith           (const std::string& _string, const std::string& _end);
+ 		std::string  removeParenthesis  (const std::string& _string);		
++		std::string  cleanTitle         (const std::string& _string);
+ 		std::string  vectorToCommaString(stringVector _vector);
+ 		stringVector commaStringToVector(const std::string& _string);
+ 		std::string  format             (const char* _string, ...);

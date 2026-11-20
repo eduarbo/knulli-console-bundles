@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 17:11:44 +0000
+Subject: [PATCH] Let a grid draw the next row peeking past its edge
+
+Image grid peekSize: how far past its bottom edge (its right edge when
+it scrolls sideways) the grid draws, in screen height. The row after the
+last whole one shows there, cut at that edge, instead of leaving the
+room empty. The cursor still scrolls by whole rows, and a row scrolling
+in comes from that place: it is one of the rows the grid keeps on each
+side.
+---
+ THEMES.md                                   |  2 ++
+ es-core/src/ThemeData.cpp                   |  1 +
+ es-core/src/components/ImageGridComponent.h | 16 ++++++++++++++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/THEMES.md b/THEMES.md
+index 3a4291aa..ba5cd6ad 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -982,6 +982,8 @@ Can be created as an extra.
+     - BATOCERA 5.24 : Number of column and rows in the grid (integer values).
+ * `autoLayoutSelectedZoom` - type: FLOAT. 
+     - BATOCERA 5.24: Zoom factor to apply when a tile is selected.    
++* `peekSize` - type: FLOAT.
++    - How far past its bottom edge (its right edge when it scrolls horizontally) the grid draws, in screen height (width): the row after the last whole one peeks in, cut there. The cursor still scrolls by whole rows, and a row scrolling in comes from that place.
+ * `imageSource` - type: STRING.
+     - BATOCERA 5.24: Selects the image to display. `thumbnail` by default, can also be set to `image` or `marquee`. 
+ * `showVideoAtDelay` - type: FLOAT.
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index b9fa3150..8c9ada05 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -203,6 +203,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 
+ 		{ "autoLayout", NORMALIZED_PAIR },
+ 		{ "autoLayoutSelectedZoom", FLOAT },
++		{ "peekSize", FLOAT },
+ 		{ "animateSelection", BOOLEAN },
+ 		{ "imageSource", STRING },				// image, thumbnail, marquee
+ 		{ "zIndex", FLOAT },
+diff --git a/es-core/src/components/ImageGridComponent.h b/es-core/src/components/ImageGridComponent.h
+index c2b41150..5c6dfc1b 100644
+--- a/es-core/src/components/ImageGridComponent.h
++++ b/es-core/src/components/ImageGridComponent.h
+@@ -181,6 +181,7 @@ private:
+ 	bool mAnimateSelection;
+ 	Vector2f mAutoLayout;
+ 	float mAutoLayoutZoom;
++	float mPeekSize;	// screen fraction the grid draws past its far edge (the next row peeking in)
+ 	Vector4f mPadding;
+ 	Vector2f mMargin;
+ 	Vector2f mTileSize;
+@@ -458,6 +459,7 @@ ImageGridComponent<T>::ImageGridComponent(Window* window) : IList<ImageGridData,
+ 	mGridSizeOverride = Vector2f::Zero();
+ 	mAutoLayout = Vector2f::Zero();
+ 	mAutoLayoutZoom = 1.0;
++	mPeekSize = 0.0f;
+ 
+ 	mVideoDelay = 750;
+ 	mAllowVideo = false;
+@@ -778,6 +780,17 @@ void ImageGridComponent<T>::render(const Transform4x4f& parentTrans)
+ 	if (mAutoLayout == Vector2f::Zero() && mLastRowPartial) // If the last row is partial in Retropie, extend clip to show the entire last row 
+ 		size.y() = (mTileSize + mMargin).y() * (mGridDimension.y() - 2 * EXTRAITEMS);
+ 
++	// The row after the last whole one peeks in past the grid's far edge, cut there (it is one of the rows kept
++	// on each side for the scroll, so a row scrolling in comes from that place); the cursor still scrolls by
++	// whole rows
++	if (mPeekSize > 0.0f)
++	{
++		if (isVertical())
++			size.y() += (int)Math::round(mPeekSize * Renderer::getScreenHeight());
++		else
++			size.x() += (int)Math::round(mPeekSize * Renderer::getScreenWidth());
++	}
++
+ 	Renderer::pushClipRect(pos, size);
+ 
+ 	float dimScrollable = isVertical() ? mGridDimension.y() - 2 * EXTRAITEMS : mGridDimension.x() - 2 * EXTRAITEMS;
+@@ -909,6 +922,9 @@ void ImageGridComponent<T>::applyTheme(const std::shared_ptr<ThemeData>& theme,
+ 		if (elem->has("autoLayoutSelectedZoom"))
+ 			mAutoLayoutZoom = elem->get<float>("autoLayoutSelectedZoom");
+ 
++		if (elem->has("peekSize"))
++			mPeekSize = Math::max(0.0f, elem->get<float>("peekSize"));
++
+ 		if (elem->has("imageSource"))
+ 		{
+ 			auto direction = elem->get<std::string>("imageSource");

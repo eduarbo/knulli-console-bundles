@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 16:51:14 +0000
+Subject: [PATCH] Document what /restart, /quit and /removegames do
+
+The API summary at the top of HttpServerThread.cpp is the only reference
+for the web API, and it lists these routes without saying what they do:
+
+- /restart calls quitES(REBOOT), the same as RESTART SYSTEM in the quit
+  menu, so it reboots the device. Scripts that want to restart only
+  EmulationStation expect otherwise.
+- /quit exits EmulationStation; Knulli's emulationstation-standalone loop
+  then starts it again, so this is the route that restarts only ES.
+- /removegames deletes each listed game file from disk, besides removing
+  it from the gamelist.
+---
+ es-app/src/services/HttpServerThread.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/es-app/src/services/HttpServerThread.cpp b/es-app/src/services/HttpServerThread.cpp
+index efa82a23..eb9990bc 100644
+--- a/es-app/src/services/HttpServerThread.cpp
++++ b/es-app/src/services/HttpServerThread.cpp
+@@ -30,8 +30,8 @@
+ Misc APIS
+ -----------------
+ GET  /caps                                                      -> capability info
+-GET  /restart
+-GET  /quit
++GET  /restart													-> reboots the system, like RESTART SYSTEM in the quit menu (not only EmulationStation)
++GET  /quit														-> exits EmulationStation; on Knulli, emulationstation-standalone starts it again
+ GET  /emukill
+ GET  /reloadgames
+ POST /messagebox												-> body must contain the message text as text/plain
+@@ -53,7 +53,7 @@ POST /systems/{systemName}/games/{gameId}/media/{mediaType}		-> body must contai
+ Store APIs
+ ----------
+ POST /addgames/{systemName}										-> body must contain partial gamelist.xml file as application/xml
+-POST /removegames/{systemName}									-> body must contains partial gamelist.xml file as application/xml
++POST /removegames/{systemName}									-> body must contains partial gamelist.xml file as application/xml. Deletes the listed game files from disk
+ 
+ File APIs
+ ---------

@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:53:46 +0000
+Subject: [PATCH] Replay kept draws in their order, with their own shader
+ parameters
+
+- A frame cut short by a texture change (a video's frame) sends what was
+  kept so far while it still records. A square rectangle is drawn through
+  Renderer's own drawRect, so its replay was kept again and drawn after
+  everything that followed it, over the text on it. Nothing is kept while
+  kept commands run.
+- A rectangle draws its fill and its border with one shader object and
+  changes its parameters between the two; a draw sent later read the last
+  ones. Each kept draw copies its custom shader as it was.
+---
+ es-core/src/renderers/Renderer.cpp | 33 +++++++++++++++++++++++-------
+ 1 file changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/es-core/src/renderers/Renderer.cpp b/es-core/src/renderers/Renderer.cpp
+index ff3d24ac..7dcc1551 100644
+--- a/es-core/src/renderers/Renderer.cpp
++++ b/es-core/src/renderers/Renderer.cpp
+@@ -13,6 +13,7 @@
+ #include "utils/StringUtil.h"
+ 
+ #include <SDL.h>
++#include <deque>
+ #include <set>
+ #include <stack>
+ 
+@@ -862,9 +863,10 @@ namespace Renderer
+ 
+ 		struct Frame
+ 		{
+-			State                start;
+-			std::vector<Command> commands;
+-			std::vector<Vertex>  vertices;
++			State                  start;
++			std::vector<Command>   commands;
++			std::vector<Vertex>    vertices;
++			std::deque<ShaderInfo> shaders;		// the custom shaders of its vertices, as they were when kept
+ 		};
+ 
+ 		static bool                   recording = false;
+@@ -984,15 +986,29 @@ namespace Renderer
+ 			command.count = count;
+ 			frame.vertices.insert(frame.vertices.end(), vertices, vertices + count);
+ 
+-			// A custom shader is given the frame's number: the same commands do not draw the same frame
+ 			for (unsigned int i = 0; i < count; i++)
+-				if (vertices[i].customShader != nullptr)
+-					mustShow = true;
++			{
++				if (vertices[i].customShader == nullptr)
++					continue;
++
++				// Its parameters are copied: a component may change them for its next draw before this one
++				// is sent (a rectangle draws its fill and its border with one shader)
++				frame.shaders.push_back(*vertices[i].customShader);
++				frame.vertices[command.first + i].customShader = &frame.shaders.back();
++
++				// A custom shader is given the frame's number: the same commands do not draw the same frame
++				mustShow = true;
++			}
+ 		}
+ 
+-		// Sends the commands not sent yet, in order
++		// Sends the commands not sent yet, in order. Nothing is kept while they run: a renderer may draw
++		// through Renderer's own functions (a square rectangle is drawn with drawRect), and what it draws
++		// would otherwise be added to the end of the frame and drawn after the commands that follow.
+ 		static void send()
+ 		{
++			bool wasRecording = recording;
++			recording = false;
++
+ 			for (; sent < frame.commands.size(); sent++)
+ 			{
+ 				const Command& c = frame.commands[sent];
+@@ -1014,6 +1030,8 @@ namespace Renderer
+ 				case Command::READ_BACK:  break;
+ 				}
+ 			}
++
++			recording = wasRecording;
+ 		}
+ 
+ 		// Before anything that must run at once: what was kept is sent, and the frame will be shown
+@@ -1077,6 +1095,7 @@ namespace Renderer
+ 
+ 		frame.commands.clear();
+ 		frame.vertices.clear();
++		frame.shaders.clear();
+ 		frame.start = state;
+ 		sent = 0;
+ 		mustShow = false;

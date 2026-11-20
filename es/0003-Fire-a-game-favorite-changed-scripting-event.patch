@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 17:09:53 +0000
+Subject: [PATCH] Fire a game-favorite-changed scripting event
+
+Scripts can react to game-start, game-end and game-selected, but not to
+the player marking or unmarking a favorite, so a script that keeps
+favorites in sync with another device or service has to poll the
+gamelist or the web API.
+
+Fire "game-favorite-changed" with the system name, the game path and the
+new value ("true" or "false") when the favorite changes from the game
+list (favorite button, game options menu) or from the metadata editor.
+Changes made through the web API do not fire it, so a script that sets
+favorites through the API does not get its own changes back.
+---
+ es-app/src/CollectionSystemManager.cpp |  3 +++
+ es-app/src/guis/GuiMetaDataEd.cpp      | 10 ++++++++++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/es-app/src/CollectionSystemManager.cpp b/es-app/src/CollectionSystemManager.cpp
+index 1b6ae3b9..d8ba3174 100644
+--- a/es-app/src/CollectionSystemManager.cpp
++++ b/es-app/src/CollectionSystemManager.cpp
+@@ -22,6 +22,7 @@
+ #include "utils/ThreadPool.h"
+ #include "Genres.h"
+ #include "Paths.h"
++#include "Scripting.h"
+ 
+ std::string myCollectionsName = "collections";
+ 
+@@ -676,6 +677,8 @@ bool CollectionSystemManager::toggleGameInCollection(FileData* file, const std::
+ 		saveToGamelistRecovery(sourceFile);
+ 		refreshCollectionSystems(sourceFile);
+ 
++		Scripting::fireEvent("game-favorite-changed", sourceSystem->getName(), sourceFile->getPath(), adding ? "true" : "false");
++
+ 		auto view = ViewController::get()->getGameListView(sourceSystem, false);
+ 		if (view != nullptr && view->hasFileDataEntry(sourceFile))
+ 			view->onFileChanged(sourceFile, FILE_METADATA_CHANGED);
+diff --git a/es-app/src/guis/GuiMetaDataEd.cpp b/es-app/src/guis/GuiMetaDataEd.cpp
+index 4a33fd9f..91afbecc 100644
+--- a/es-app/src/guis/GuiMetaDataEd.cpp
++++ b/es-app/src/guis/GuiMetaDataEd.cpp
+@@ -26,6 +26,7 @@
+ #include "ApiSystem.h"
+ #include "scrapers/Scraper.h"
+ #include "Genres.h"
++#include "Scripting.h"
+ #include <algorithm>
+ #include <set>
+ 
+@@ -411,6 +412,8 @@ bool GuiMetaDataEd::save()
+ 
+ 	auto performSave = [this](std::set<std::string> filesToCopy)
+ 	{
++		bool wasFavorite = mMetaData->get(MetaDataId::Favorite) == "true";
++
+ 		// remove game from index
+ 		mScraperParams.system->removeFromIndex(mScraperParams.game);
+ 
+@@ -467,6 +470,13 @@ bool GuiMetaDataEd::save()
+ 
+ 		// update respective Collection Entries
+ 		CollectionSystemManager::get()->refreshCollectionSystems(mScraperParams.game);
++
++		bool isFavorite = mMetaData->get(MetaDataId::Favorite) == "true";
++		if (isFavorite != wasFavorite)
++		{
++			auto sourceFile = mScraperParams.game->getSourceFileData();
++			Scripting::fireEvent("game-favorite-changed", sourceFile->getSystem()->getName(), sourceFile->getPath(), isFavorite ? "true" : "false");
++		}
+ 	};
+ 
+ 	for (unsigned int i = 0; i < mEditors.size(); i++)

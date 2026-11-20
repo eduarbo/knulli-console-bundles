@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 19:02:18 +0000
+Subject: [PATCH] Give up on a video VLC cannot read instead of waiting for it
+ forever
+
+The video component waited for libvlc_media_parsed_status_done with no
+timeout. A file whose parse fails, is skipped or times out (an empty file,
+say) never reaches it, so the UI thread waited forever: the screen froze for
+as long as the video was on screen, with nobody touching the console once a
+system view starts videos on its own.
+
+The parse now has a 2 s timeout, and the wait ends on any final status, with
+a hard cap a little past it. Anything but a parsed file is no video: the
+snapshot shows (showSnapshotNoVideo too), and the file is remembered by its
+path and size, so it is not tried again on every frame or every visit until
+it is replaced.
+---
+ THEMES.md                                    |  3 ++
+ es-core/src/components/VideoComponent.cpp    | 36 +++++++++++++++++++-
+ es-core/src/components/VideoComponent.h      |  5 +++
+ es-core/src/components/VideoVlcComponent.cpp | 32 ++++++++++++++---
+ 4 files changed, 71 insertions(+), 5 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index e4b748f0..2266c3eb 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -975,6 +975,9 @@ Can be created as an extra.
+ 
+ Can be created as an extra.
+ 
++A file VLC cannot read (empty, truncated, not a video; it has 2 seconds to read the tracks) is no video: the
++snapshot shows, and the file is not tried again until its size changes.
++
+ * `pos` - type: NORMALIZED_PAIR.
+ * `size` - type: NORMALIZED_PAIR.
+ 	- If only one axis is specified (and the other is zero), the other will be automatically calculated in accordance with the video's aspect ratio.
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index c67b492c..7deec7a3 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -8,6 +8,8 @@
+ #include <SDL_timer.h>
+ #include "LocaleES.h"
+ #include "Paths.h"
++#include <map>
++#include <mutex>
+ 
+ #define FADE_TIME_MS	400
+ 
+@@ -209,11 +211,43 @@ void VideoComponent::render(const Transform4x4f& parentTrans)
+ 	handleLooping();
+ }
+ 
++static std::map<std::string, unsigned long long> sUnplayableVideos;
++static std::mutex sUnplayableVideosLock;
++
++void VideoComponent::markUnplayable(const std::string& path)
++{
++	if (path.empty())
++		return;
++
++	std::unique_lock<std::mutex> lock(sUnplayableVideosLock);
++	sUnplayableVideos[path] = Utils::FileSystem::getFileSize(path);
++}
++
++bool VideoComponent::isUnplayable(const std::string& path)
++{
++	if (path.empty())
++		return false;
++
++	std::unique_lock<std::mutex> lock(sUnplayableVideosLock);
++	auto it = sUnplayableVideos.find(path);
++	if (it == sUnplayableVideos.cend())
++		return false;
++
++	// Replaced since (a new size): try it again
++	if (Utils::FileSystem::getFileSize(path) != it->second)
++	{
++		sUnplayableVideos.erase(it);
++		return false;
++	}
++
++	return true;
++}
++
+ void VideoComponent::renderSnapshot(const Transform4x4f& parentTrans)
+ {
+ 	// This is the case where the video is not currently being displayed. Work out
+ 	// if we need to display a static image
+-	if ((mConfig.showSnapshotNoVideo && mVideoPath.empty()) || ((mStartDelayed || mFadeIn < 1.0) && mConfig.showSnapshotDelay))
++	if ((mConfig.showSnapshotNoVideo && (mVideoPath.empty() || isUnplayable(mVideoPath))) || ((mStartDelayed || mFadeIn < 1.0) && mConfig.showSnapshotDelay))
+ 	{
+ 		float t = 1.0 - mFadeIn;
+ 		t -= 1; // cubic ease out
+diff --git a/es-core/src/components/VideoComponent.h b/es-core/src/components/VideoComponent.h
+index 1b5d8f54..97127163 100644
+--- a/es-core/src/components/VideoComponent.h
++++ b/es-core/src/components/VideoComponent.h
+@@ -163,6 +163,11 @@ public:
+ 
+ 	bool showSnapshots();
+ 
++	// A video file that could not be read (VLC parse failed or timed out) is not tried again while it keeps
++	// its size; it counts as no video, so the snapshot shows
++	static void markUnplayable(const std::string& path);
++	static bool isUnplayable(const std::string& path);
++
+ protected:
+ 	std::shared_ptr<IPlaylist> mPlaylist;
+ 	std::function<bool()> mVideoEnded;
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 3284a253..2f131ef3 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -18,11 +18,15 @@
+ #endif
+ 
+ #include "ImageIO.h"
++#include "Log.h"
+ 
+ #define MATHPI          3.141592653589793238462643383279502884L
+ 
+ libvlc_instance_t* VideoVlcComponent::mVLC = NULL;
+ 
++// How long VLC may take to read a video's tracks before the file counts as no video
++static const int PARSE_TIMEOUT_MS = 2000;
++
+ // VLC prepares to render a video frame.
+ static void *lock(void *data, void **p_pixels) 
+ {
+@@ -753,8 +757,8 @@ void VideoVlcComponent::startVideo()
+ #else
+ 	std::string path(mVideoPath);
+ #endif
+-	// Make sure we have a video path
+-	if (mVLC && (path.size() > 0))
++	// Make sure we have a video path, and not one VLC could not read before
++	if (mVLC && (path.size() > 0) && !isUnplayable(mVideoPath))
+ 	{
+ 		// Set the video that we are going to be playing so we don't attempt to restart it
+ 		mPlayingVideoPath = mVideoPath;
+@@ -787,9 +791,29 @@ void VideoVlcComponent::startVideo()
+ 			// It looks like an older version of the library is being used on Windows.
+ 			libvlc_media_parse(mMedia);
+ #else
+-			libvlc_media_parse_with_options(mMedia, libvlc_media_parse_local, 0);
+-			while (libvlc_media_get_parsed_status(mMedia) != libvlc_media_parsed_status_done)
++			// A finite parse, and out of the loop on any final status: a file VLC cannot read (empty, truncated,
++			// not a video) fails, is skipped or times out instead of holding the UI thread forever
++			libvlc_media_parse_with_options(mMedia, libvlc_media_parse_local, PARSE_TIMEOUT_MS);
++
++			libvlc_media_parsed_status_t parsed = libvlc_media_get_parsed_status(mMedia);
++			Uint32 parseEnd = SDL_GetTicks() + PARSE_TIMEOUT_MS + 500;
++			while (parsed != libvlc_media_parsed_status_done && parsed != libvlc_media_parsed_status_failed &&
++				parsed != libvlc_media_parsed_status_timeout && parsed != libvlc_media_parsed_status_skipped && SDL_GetTicks() < parseEnd)
++			{
+ 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
++				parsed = libvlc_media_get_parsed_status(mMedia);
++			}
++
++			// Anything but a parsed file is no video: the snapshot shows, and this file is not tried again
++			// (while it keeps its size), so there is no restart loop
++			if (parsed != libvlc_media_parsed_status_done)
++			{
++				LOG(LogWarning) << "VideoVlcComponent: cannot read " << path << " (parse status " << (int)parsed << ")";
++				markUnplayable(mVideoPath);
++				libvlc_media_release(mMedia);
++				mMedia = NULL;
++				return;
++			}
+ #endif
+ 			libvlc_media_track_t** tracks;
+ 			track_count = libvlc_media_tracks_get(mMedia, &tracks);

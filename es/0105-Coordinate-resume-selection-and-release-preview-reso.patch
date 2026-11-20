@@ -1,0 +1,428 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 04:20:39 +0000
+Subject: [PATCH] Coordinate resume selection and release preview resources
+ before starting games
+
+---
+ es-app/src/FileData.cpp                      |  35 ++++-
+ es-app/src/SaveStateConfigFile.cpp           |  20 +++
+ es-core/src/Window.cpp                       |  19 ++-
+ es-core/src/Window.h                         |   2 +-
+ es-core/src/components/VideoLeadIn.cpp       | 133 +++++++++++++++----
+ es-core/src/components/VideoLeadIn.h         |   2 +-
+ es-core/src/components/VideoVlcComponent.cpp |  12 +-
+ 7 files changed, 175 insertions(+), 48 deletions(-)
+
+diff --git a/es-app/src/FileData.cpp b/es-app/src/FileData.cpp
+index ac5148c8..518b4fac 100644
+--- a/es-app/src/FileData.cpp
++++ b/es-app/src/FileData.cpp
+@@ -656,6 +656,30 @@ std::string FileData::getlaunchCommand(LaunchGameOptions& options, bool includeC
+ 	if (monitorId >= 0 && command.find(" -system ") != std::string::npos)
+ 		command = command + " -monitor " + std::to_string(monitorId);
+ 
++#if KNULLI
++	// Resolve the default after gameStart sync. Record explicit sessions as well.
++	if (options.netPlayMode == DISABLED && SaveStateRepository::isEnabledForGame(this))
++	{
++		const std::string resume = Paths::getUserEmulationStationPath() + "/resume/emulatorlauncher";
++		for (const std::string name : {std::string("emulatorlauncher"), std::string("/usr/bin/emulatorlauncher")})
++		{
++			if (command.compare(0, name.size() + 1, name + " ") != 0 || !Utils::FileSystem::exists(resume))
++				continue;
++			auto state = options.saveStateInfo;
++			std::string launcher = Utils::FileSystem::getEscapedPath(resume);
++			if (!state)
++				return launcher + command.substr(name.size());
++			launcher += " --es-resume-slot=" + std::to_string(state->slot);
++			command = launcher + command.substr(name.size());
++			// The active libretro core can open a slot directly, without staging a
++			// copy or renaming the player's automatic state before sync.
++			if (getEmulator() == "libretro" && (!state->config || state->config->isActiveConfig(this)))
++				return command;
++			break;
++		}
++	}
++#endif
++
+ 	if (SaveStateRepository::isEnabled(this))
+ 	{
+ 		if (options.saveStateInfo == nullptr)
+@@ -726,14 +750,21 @@ bool FileData::launchGame(Window* window, LaunchGameOptions options)
+ 		return false;
+ 
+ 	// KNULLI - QUICK RESUME MODE >>>>>
+-	QuickResume::setQuickResume(getlaunchCommand(false), getFullPath());
++	const std::string quickResumeCommand = getlaunchCommand(false);
+ 	// KNULLI - QUICK RESUME MODE <<<<<
+ 
+ 	AudioManager::getInstance()->deinit();
+ 	VolumeControl::getInstance()->deinit();
+ 
+ 	bool hideWindow = Settings::getInstance()->getBool("HideWindow");
+-	window->deinit(hideWindow);
++	if (!window->deinit(hideWindow, true))
++	{
++		VolumeControl::getInstance()->init();
++		AudioManager::getInstance()->init();
++		window->displayNotificationMessage(_("VIDEO PREVIEW IS STILL STOPPING. PLEASE TRY AGAIN."));
++		return false;
++	}
++	QuickResume::setQuickResume(quickResumeCommand, getFullPath());
+ 	
+ 	const std::string rom = Utils::FileSystem::getEscapedPath(getPath());
+ 	const std::string basename = Utils::FileSystem::getStem(getPath());
+diff --git a/es-app/src/SaveStateConfigFile.cpp b/es-app/src/SaveStateConfigFile.cpp
+index b60f0d36..0088a9ef 100644
+--- a/es-app/src/SaveStateConfigFile.cpp
++++ b/es-app/src/SaveStateConfigFile.cpp
+@@ -4,6 +4,7 @@
+ #include "utils/StringUtil.h"
+ #include "utils/FileSystemUtil.h"
+ #include "Paths.h"
++#include "SystemConf.h"
+ #include "Log.h"
+ #include <mutex>
+ 
+@@ -50,6 +51,25 @@ std::shared_ptr<SaveStateConfig> SaveStateConfig::Default()
+ 
+ std::string SaveStateConfig::getDirectory(SystemData* system)
+ {
++#if KNULLI
++	// A relocated RetroArch state directory is also the save manager's directory.
++	if (emulator == "libretro" && directory == "{{system}}")
++	{
++		auto setting = [system](const std::string& key) {
++			auto conf = SystemConf::getInstance();
++			auto value = conf->get(system->getName() + ".retroarch." + key);
++			if (value.empty()) value = conf->get("global.retroarch." + key);
++			return Utils::String::replace(value, "\"", "");
++		};
++		auto base = setting("savestate_directory");
++		if (!base.empty() && base[0] == '/' && setting("sort_savestates_enable") != "true")
++		{
++			if (setting("sort_savestates_by_content_enable") == "true")
++				return Utils::FileSystem::combine(base, Utils::FileSystem::getFileName(system->getStartPath()));
++			return base;
++		}
++	}
++#endif
+ 	std::string path = Utils::String::replace(directory, "{{system}}", system->getName());
+ 	path = Utils::String::replace(path, "{{emulator}}", emulator);
+ 	path = Utils::String::replace(path, "{{core}}", core.empty() ? emulator : core);
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index 3e24a48c..39fd590f 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -211,7 +211,7 @@ static bool coversScreen(GuiComponent* gui)
+ 	return false;
+ }
+ 
+-void Window::deinit(bool deinitRenderer)
++bool Window::deinit(bool deinitRenderer, bool forGame)
+ {
+ 	resetMenuBackgroundShader();
+ 
+@@ -222,11 +222,17 @@ void Window::deinit(bool deinitRenderer)
+ 	for(auto i = mGuiStack.cbegin(); i != mGuiStack.cend(); i++)
+ 		(*i)->onHide();
+ 
+-	// Their videos stop on a worker: a game run now could find the sound output still held
+-	VideoVlcComponent::waitForPlayers(1500);
+-
+-	// no video measured while a game runs
+-	VideoLeadIn::pause(true);
++	bool probeStopped = VideoLeadIn::pause(true);
++	bool playersStopped = VideoVlcComponent::waitForPlayers(1500);
++	if (forGame && (!playersStopped || !probeStopped))
++	{
++		VideoLeadIn::pause(false);
++		for (auto extra : mScreenExtras)
++			extra->onShow();
++		if (peekGui())
++			peekGui()->onShow();
++		return false;
++	}
+ 
+ 	if (deinitRenderer)
+ 		InputManager::getInstance()->deinit();
+@@ -236,6 +242,7 @@ void Window::deinit(bool deinitRenderer)
+ 
+ 	if (deinitRenderer)
+ 		Renderer::deinit();
++	return true;
+ }
+ 
+ void Window::textInput(const char* text)
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 41eef146..66979463 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -62,7 +62,7 @@ public:
+ 	void render();
+ 
+ 	bool init(bool initRenderer = true, bool initInputManager = true);
+-	void deinit(bool deinitRenderer = true);
++	bool deinit(bool deinitRenderer = true, bool forGame = false);
+ 
+ 	void normalizeNextUpdate();
+ 
+diff --git a/es-core/src/components/VideoLeadIn.cpp b/es-core/src/components/VideoLeadIn.cpp
+index 74de8062..cda85d9e 100644
+--- a/es-core/src/components/VideoLeadIn.cpp
++++ b/es-core/src/components/VideoLeadIn.cpp
+@@ -16,6 +16,18 @@
+ #include <mutex>
+ #include <set>
+ #include <thread>
++#include <chrono>
++#include <sstream>
++#ifndef _WIN32
++#include <cerrno>
++#include <csignal>
++#include <spawn.h>
++#include <sys/resource.h>
++#include <sys/stat.h>
++#include <sys/wait.h>
++#include <unistd.h>
++extern char** environ;
++#endif
+ 
+ namespace
+ {
+@@ -26,7 +38,7 @@ namespace
+ 	struct Known
+ 	{
+ 		std::string stamp;	// the file's size and date when measured
+-		int ms;
++		int ms = 0;
+ 		unsigned int width = 0, height = 0;	// the video stream's size (0: not read)
+ 		bool audio = false;
+ 	};
+@@ -41,6 +53,7 @@ namespace
+ 		bool loaded = false;
+ 		bool started = false;
+ 		bool paused = false;
++		bool measuring = false;
+ 		int available = -1;
+ 	};
+ 
+@@ -91,11 +104,22 @@ namespace
+ 
+ 			Known known;
+ 			known.stamp = line.substr(a + 1, b - a - 1);
+-			int audio = 0;
+-			if (sscanf(line.substr(0, a).c_str(), "%d %u %u %d", &known.ms, &known.width, &known.height, &audio) < 4)
+-				known.width = known.height = 0;
+-
+-			known.audio = audio != 0;
++			std::istringstream fields(line.substr(0, a));
++			if (!(fields >> known.ms) || known.ms < 0 || known.ms > VideoLight::VIDEO_LEAD_IN_MEASURED_MS)
++				continue;
++			fields >> std::ws;
++			if (!fields.eof())
++			{
++				int audio;
++				if (!(fields >> known.width >> known.height >> audio) || (audio != 0 && audio != 1) ||
++					!((known.width == 0 && known.height == 0) || (known.width >= 16 && known.width <= 8192 &&
++					known.height >= 16 && known.height <= 8192)))
++					continue;
++				fields >> std::ws;
++				if (!fields.eof())
++					continue;
++				known.audio = audio == 1;
++			}
+ 			sKnown[line.substr(b + 1)] = known;
+ 		}
+ 	}
+@@ -108,26 +132,71 @@ namespace
+ 	}
+ 
+ 
+-	std::string quoted(const std::string& s)
++	// Bound the lifetime of the local probe. Its anonymous log is removed on close.
++	bool measure(const std::string& path, Known& known)
+ 	{
+-		return "'" + Utils::String::replace(s, "'", "'\\''") + "'";
+-	}
+-
+-	// The lead-in of a file from ffmpeg's showinfo of its first frames (each frame's time and luma), at low
+-	// priority, with its first video stream's size and whether it has sound; 0 when ffmpeg reads no frame
+-	void measure(const std::string& path, Known& known)
+-	{
+-		std::string command = std::string("nice -n 10 ") + FFMPEG + " -hide_banner -nostdin -v info -threads 1 -an -sn -dn -t " +
+-			std::to_string(VideoLight::VIDEO_LEAD_IN_MEASURED_MS / 1000.0f) + " -i " + quoted(path) + " -vf scale=32:24,showinfo -f null - 2>&1";
+-
+-		known.ms = 0;
+-		FILE* pipe = popen(command.c_str(), "r");
+-		if (pipe == nullptr)
+-			return;
+-
++#ifdef _WIN32
++		return false;
++#else
++		struct stat info;
++		if (path.empty() || path[0] != '/' || stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode))
++			return false;
++		FILE* output = tmpfile();
++		if (!output)
++			return false;
++		std::string duration = std::to_string(VideoLight::VIDEO_LEAD_IN_MEASURED_MS / 1000.0f);
++		const char* args[] = { FFMPEG, "-hide_banner", "-nostdin", "-v", "info", "-threads", "1",
++			"-an", "-sn", "-dn", "-t", duration.c_str(), "-protocol_whitelist", "file",
++			"-i", path.c_str(), "-vf", "scale=32:24,showinfo", "-f", "null", "-", nullptr };
++		posix_spawn_file_actions_t actions;
++		if (posix_spawn_file_actions_init(&actions) != 0)
++		{
++			fclose(output);
++			return false;
++		}
++		pid_t child;
++		int err = posix_spawn_file_actions_adddup2(&actions, fileno(output), STDERR_FILENO);
++		if (!err)
++			err = posix_spawn(&child, FFMPEG, &actions, nullptr, const_cast<char* const*>(args), environ);
++		posix_spawn_file_actions_destroy(&actions);
++		if (err)
++		{
++			fclose(output);
++			return false;
++		}
++		setpriority(PRIO_PROCESS, child, 10);
++		auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++		int status = 0;
++		for (;;)
++		{
++			pid_t result = waitpid(child, &status, WNOHANG);
++			if (result == child)
++				break;
++			if (result < 0 && errno != EINTR)
++			{
++				fclose(output);
++				return false;
++			}
++			std::unique_lock<std::mutex> lock(sLock);
++			if (sWake.wait_for(lock, std::chrono::milliseconds(20), [] { return sPaused; }) ||
++				std::chrono::steady_clock::now() >= deadline)
++			{
++				lock.unlock();
++				kill(child, SIGKILL);
++				while (waitpid(child, &status, 0) < 0 && errno == EINTR) { }
++				fclose(output);
++				return false;
++			}
++		}
++		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
++		{
++			fclose(output);
++			return false;
++		}
++		rewind(output);
+ 		std::vector<std::pair<int, int>> frames;
+ 		char buffer[1024];
+-		while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
++		while (fgets(buffer, sizeof(buffer), output) != nullptr)
+ 		{
+ 			// the file's streams, listed before the frames ("Stream #0:0...: Video: h264 ..., 320x240 [SAR...")
+ 			const char* stream = strstr(buffer, "Stream #0:");
+@@ -145,10 +214,12 @@ namespace
+ 			frames.push_back(std::make_pair(ms, VideoLight::videoRangeLight((float)atof(mean + 6))));
+ 		}
+ 
+-		pclose(pipe);
++		fclose(output);
+ 		known.ms = VideoLight::leadInMs(frames);
+ 		if (frames.empty())
+ 			known.width = known.height = 0;	// ffmpeg read no frame: the player parses the file itself
++		return !frames.empty();
++#endif
+ 	}
+ 
+ 	void run()
+@@ -168,16 +239,21 @@ namespace
+ 			{
+ 				std::unique_lock<std::mutex> lock(sLock);
+ 				auto it = sKnown.find(path);
+-				if (it != sKnown.cend() && it->second.stamp == stamp)
++				if (sPaused || (it != sKnown.cend() && it->second.stamp == stamp))
+ 					continue;
++				state().measuring = true;
+ 			}
+ 
+ 			Known known;
+ 			known.stamp = stamp;
+-			measure(path, known);
++			bool ok = measure(path, known);
+ 			LOG(LogDebug) << "VideoLeadIn: " << known.ms << " ms, " << known.width << "x" << known.height << (known.audio ? " with sound: " : ": ") << path;
+ 
+ 			std::unique_lock<std::mutex> lock(sLock);
++			state().measuring = false;
++			sWake.notify_all();
++			if (!ok || sPaused)
++				continue;
+ 			sKnown[path] = known;
+ 			keep(path, known);
+ 		}
+@@ -271,9 +347,10 @@ void VideoLeadIn::request(const std::string& path, bool first)
+ 	sWake.notify_one();
+ }
+ 
+-void VideoLeadIn::pause(bool paused)
++bool VideoLeadIn::pause(bool paused)
+ {
+ 	std::unique_lock<std::mutex> lock(sLock);
+ 	sPaused = paused;
+-	sWake.notify_one();
++	sWake.notify_all();
++	return !paused || sWake.wait_for(lock, std::chrono::milliseconds(1000), [] { return !state().measuring; });
+ }
+diff --git a/es-core/src/components/VideoLeadIn.h b/es-core/src/components/VideoLeadIn.h
+index ea00e1b5..561778ef 100644
+--- a/es-core/src/components/VideoLeadIn.h
++++ b/es-core/src/components/VideoLeadIn.h
+@@ -22,7 +22,7 @@ namespace VideoLeadIn
+ 	void request(const std::string& path, bool first);
+ 
+ 	// No measure starts while paused (a game runs)
+-	void pause(bool paused);
++	bool pause(bool paused);
+ }
+ 
+ #endif // ES_CORE_COMPONENTS_VIDEO_LEAD_IN_H
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 47ab29a3..a0c195f7 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -123,14 +123,6 @@ namespace
+ 			return worker;
+ 		}
+ 
+-		// The players' stops, on their own: VLC's stop waits for its threads (a quarter of a second on the
+-		// console), and the next card's video need not wait behind it
+-		static PlayerWorker* stops()
+-		{
+-			static PlayerWorker* worker = new PlayerWorker();
+-			return worker;
+-		}
+-
+ 		// false when the worker already has max tasks waiting (one stuck): the task is not taken
+ 		bool post(const std::function<void()>& task, size_t max = 0)
+ 		{
+@@ -213,7 +205,7 @@ namespace
+ 
+ 	void stopOnWorker(libvlc_media_player_t* player, std::shared_ptr<VideoContext> context)
+ 	{
+-		PlayerWorker::stops()->post([player, context]
++		PlayerWorker::players()->post([player, context]
+ 		{
+ 			libvlc_media_player_stop(player);
+ 			libvlc_media_player_release(player);
+@@ -993,7 +985,7 @@ bool VideoVlcComponent::waitForPlayers(int ms)
+ {
+ 	int start = SDL_GetTicks();
+ 	bool done = PlayerWorker::players()->drain(ms);
+-	done = PlayerWorker::stops()->drain(std::max(1, ms - (int)(SDL_GetTicks() - start))) && done;
++	done = done && sPlayers.load() == 0;
+ 	if (done)
+ 		LOG(LogDebug) << "VideoVlcComponent: players stopped in " << (SDL_GetTicks() - start) << " ms";
+ 	else

@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 17:53:58 +0000
+Subject: [PATCH] Start a tile's video delay with its selection
+
+A grid tile selected with an animation started its video only at the
+end of its 250 ms zoom, so the video's delay came after it: a card's
+video showed a quarter of a second later than the delay said, even with
+no zoom at all. The video is started with the selection (it is sized
+for the selected tile already and shows after its delay).
+---
+ es-core/src/components/GridTileComponent.cpp | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/es-core/src/components/GridTileComponent.cpp b/es-core/src/components/GridTileComponent.cpp
+index ba0dda42..23f39186 100644
+--- a/es-core/src/components/GridTileComponent.cpp
++++ b/es-core/src/components/GridTileComponent.cpp
+@@ -1317,11 +1317,15 @@ void GridTileComponent::setSelected(bool selected, bool allowAnimation, Vector3f
+ 			};
+ 
+ 			cancelAnimation(3);
+-			setAnimation(new LambdaAnimation(func, 250), 0, [this, startsVideo] {
++
++			// The video's own delay starts with the selection, not after the zoom: it is sized for the selected
++			// tile already, and shows only after its delay
++			if (startsVideo)
++				startVideo();
++
++			setAnimation(new LambdaAnimation(func, 250), 0, [this] {
+ 				this->setSelectedZoom(1);
+ 				mAnimPosition = Vector3f(0, 0, 0);
+-				if (startsVideo)
+-					startVideo();
+ 			}, false, 3);
+ 		}
+ 	}

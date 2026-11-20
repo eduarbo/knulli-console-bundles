@@ -1,0 +1,485 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 08:41:14 +0000
+Subject: [PATCH] Keep column controls contextual and fit gallery images to the
+ display
+
+---
+ es-app/src/SystemData.cpp                     |  2 +
+ es-app/src/guis/GuiImageViewer.cpp            | 20 ++++++-
+ es-app/src/guis/GuiImageViewer.h              |  4 +-
+ es-app/src/views/SystemView.cpp               | 17 +-----
+ es-app/src/views/ViewController.cpp           | 58 ++++++++++++++++++-
+ es-app/src/views/ViewController.h             |  4 ++
+ .../src/views/gamelist/GridGameListView.cpp   | 43 ++++++++++++--
+ es-app/src/views/gamelist/GridGameListView.h  |  3 +
+ es-core/src/ThemeData.cpp                     |  1 +
+ es-core/src/Window.cpp                        |  1 +
+ es-core/src/Window.h                          |  3 +-
+ .../src/components/VolumeInfoComponent.cpp    | 25 +++++++-
+ 12 files changed, 155 insertions(+), 26 deletions(-)
+
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 24bd8c24..dd87d895 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -2549,6 +2549,8 @@ BindableProperty SystemData::getProperty(const std::string& name)
+ 		}
+ 	}
+ 
++	if (name == "alphabetical")
++		return getSortId() <= FileSorts::FILENAME_DESCENDING;
+ 	if (name == "prevTab" || name == "nextTab")
+ 		return SystemView::adjacentTabName(this, name == "prevTab" ? -1 : 1);
+ 	if (name == "prevConsole" || name == "nextConsole")
+diff --git a/es-app/src/guis/GuiImageViewer.cpp b/es-app/src/guis/GuiImageViewer.cpp
+index a2493894..05bcc999 100644
+--- a/es-app/src/guis/GuiImageViewer.cpp
++++ b/es-app/src/guis/GuiImageViewer.cpp
+@@ -270,8 +270,8 @@ private:
+ 
+ static bool g_isGuiImageViewerRunning = false;
+ 
+-GuiImageViewer::GuiImageViewer(Window* window, bool linearSmooth) :
+-	GuiComponent(window), mGrid(window), mPdfThreads(nullptr)
++GuiImageViewer::GuiImageViewer(Window* window, bool linearSmooth, bool gallery) :
++	GuiComponent(window), mGallery(gallery), mGrid(window), mPdfThreads(nullptr)
+ {
+ 	g_isGuiImageViewerRunning = true;
+ 
+@@ -315,6 +315,12 @@ GuiImageViewer::GuiImageViewer(Window* window, bool linearSmooth) :
+ 		"</view>"
+ 		"</theme>";
+ 
++	if (gallery)
++	{
++		xml = Utils::String::replace(xml, "<padding>4 4</padding>", "<padding>0 0</padding>");
++		xml = Utils::String::replace(xml, "<linearSmooth>true</linearSmooth>",
++			"<pos>0.5 0.5</pos><origin>0.5 0.5</origin><maxSize>1 1</maxSize><linearSmooth>true</linearSmooth>");
++	}
+ 	if (!linearSmooth)
+ 		xml = Utils::String::replace(xml, "<linearSmooth>true</linearSmooth>", "<linearSmooth>false</linearSmooth>");
+ 
+@@ -327,6 +333,16 @@ GuiImageViewer::GuiImageViewer(Window* window, bool linearSmooth) :
+ 	animateTo(Vector2f(0, Renderer::getScreenHeight()), Vector2f(0, 0));
+ }
+ 
++void GuiImageViewer::render(const Transform4x4f& parentTrans)
++{
++	if (mGallery)
++	{
++		Renderer::setMatrix(getTransform() * parentTrans);
++		Renderer::drawRect(0, 0, mSize.x(), mSize.y(), 0x000000ff);
++	}
++	GuiComponent::render(parentTrans);
++}
++
+ void GuiImageViewer::loadPdf(const std::string& imagePath)
+ {
+ 	Window* window = mWindow;
+diff --git a/es-app/src/guis/GuiImageViewer.h b/es-app/src/guis/GuiImageViewer.h
+index cc210dd8..d5706da5 100644
+--- a/es-app/src/guis/GuiImageViewer.h
++++ b/es-app/src/guis/GuiImageViewer.h
+@@ -16,12 +16,13 @@ public:
+ 	static void showImage(Window* window, const std::string imagePath, bool zoomSingleFile = false);
+ 	static void showImages(Window* window, std::vector<std::string>& images);
+ 
+-	GuiImageViewer(Window* window, bool linearSmooth = false);
++	GuiImageViewer(Window* window, bool linearSmooth = false, bool gallery = false);
+ 	~GuiImageViewer();
+ 
+ 	bool input(InputConfig* config, Input input) override;
+ 	virtual std::vector<HelpPrompt> getHelpPrompts() override;
+ 
++	void render(const Transform4x4f& parentTrans) override;
+ 	void add(const std::string imagePath);
+ 	void setCursor(const std::string imagePath);
+ 
+@@ -30,6 +31,7 @@ protected:
+ 	void loadCbz(const std::string& imagePath);
+ 	void loadImages(std::vector<std::string>& images);
+ 
++	bool mGallery;
+ 	ImageGridComponent<std::string> mGrid;
+ 	std::shared_ptr<ThemeData> mTheme;
+ 	std::string mPdf;
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index f9c882e8..086c8693 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -768,20 +768,9 @@ bool SystemView::input(InputConfig* config, Input input)
+ 
+ 	if (input.value != 0)
+ 	{
+-		// Tabs: X continues the selected system's last game, else plays the game the panel suggests;
+-		// nothing on tools, emulators and screenshots (it never runs a tool again unasked). In columns, at the
+-		// tabs (level 1, no system's column shown) it continues the console's last game, the status line's
+-		if (hasTabs() && config->isMappedTo("x", input) && hasColumns() && mColumnLevel == 1)
+-		{
+-			FileData* game = SystemData::getConsoleLastPlayedGame();
+-			if (game != nullptr)
+-			{
+-				mCarousel.stopScrolling();
+-				ViewController::get()->launch(game);
+-			}
+-
++		// The rail selects a category. Continue belongs to a focused console card.
++		if (hasTabs() && hasColumns() && mColumnLevel == 1 && config->isMappedTo("x", input))
+ 			return true;
+-		}
+ 
+ 		if (hasTabs() && config->isMappedTo("x", input))
+ 		{
+@@ -1468,7 +1457,7 @@ std::vector<HelpPrompt> SystemView::getHelpPrompts()
+ 	if (hasTabs())
+ 	{
+ 		SystemData* system = getSelected();
+-		if (hasColumns() && mColumnLevel == 1 ? SystemData::getConsoleLastPlayedGame() != nullptr : system != nullptr && system->getContinueGame() != nullptr)
++		if ((!hasColumns() || mColumnLevel == 2) && system != nullptr && system->getContinueGame() != nullptr)
+ 			prompts.push_back(HelpPrompt("x", _("CONTINUE")));
+ 
+ 		if (SystemData::getSystem("all") != nullptr)
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index dcb26fbf..a124a639 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -162,6 +162,7 @@ void ViewController::goToSystemView(std::string& systemName, bool forceImmediate
+ 
+ void ViewController::goToSystemView(SystemData* system, bool forceImmediate)
+ {
++	mCycleFrom.reset();
+ 	SystemData* dest = system;
+ 
+ 	int systemId = getSystemId(dest);
+@@ -244,11 +245,36 @@ bool ViewController::goToGameList(const std::string& systemName, bool forceImmed
+ 	return false;
+ }
+ 
++// Both lists stay in screen coordinates, including on category boundaries and wraparound.
++void ViewController::cycleGameList(SystemData* system, int direction)
++{
++	if (!system || mState.viewing != GAME_LIST || mState.system == system)
++		return;
++	if (mColumnSlide.list)
++	{
++		getSystemListView()->setColumnFade(1);
++		mColumnSlide.list->setColumnFade(1);
++		mColumnSlide.list.reset();
++	}
++	auto previous = getGameListView(mState.system, false);
++	goToGameList(system, true);
++	cancelAnimation(0);
++	mFadeOpacity = 0;
++	mCamera.translation() = -mCurrentView->getPosition();
++	if (Settings::PowerSaverMode() != "instant")
++	{
++		mCycleFrom = previous;
++		mCycleElapsed = 0;
++		mCycleDirection = direction;
++	}
++}
++
+ void ViewController::goToGameList(SystemData* system, bool forceImmediate)
+ {
+ 	if (system == nullptr)
+ 		return;
+ 
++	mCycleFrom.reset();
+ 	SystemData* destinationSystem = system;
+ 	FolderData* collectionFolder = nullptr;
+ 
+@@ -664,13 +690,23 @@ void ViewController::launch(FileData* game, LaunchGameOptions options, Vector3f
+ 			GuiImageViewer::showCbz(mWindow, game->getPath());
+ 		else if (!Utils::FileSystem::isAudio(game->getPath()))
+ 		{
+-			auto gameImage = game->getImagePath();
++			const auto galleryImage = [](FileData* entry) -> std::string {
++				auto file = entry->getSourceFileData();
++				const auto path = file->getPath();
++				if (file->getType() != GAME || Utils::FileSystem::isVideo(path) || Utils::FileSystem::isAudio(path))
++					return {};
++				const auto ext = Utils::String::toLower(Utils::FileSystem::getExtension(path));
++				if (ext == ".pdf" || ext == ".cbz")
++					return {};
++				return Utils::FileSystem::isImage(path) || ext == ".bmp" ? path : file->getImagePath();
++			};
++			auto gameImage = galleryImage(game);
+ 			if (Utils::FileSystem::exists(gameImage))
+ 			{
+-				auto imgViewer = new GuiImageViewer(mWindow);
++				auto imgViewer = new GuiImageViewer(mWindow, false, true);
+ 
+ 				for (auto sibling : game->getParent()->getChildrenListToDisplay())
+-					imgViewer->add(sibling->getImagePath());
++					imgViewer->add(galleryImage(sibling));
+ 
+ 				imgViewer->setCursor(gameImage);
+ 				mWindow->pushGui(imgViewer);
+@@ -1072,6 +1108,8 @@ void ViewController::update(int deltaTime)
+ 		mCurrentView->update(deltaTime);
+ 
+ 	updateColumnSlide(deltaTime);
++	if (mCycleFrom && ((mCycleElapsed += deltaTime) >= 165 || mState.viewing != GAME_LIST || mColumnSlide.list))
++		mCycleFrom.reset();
+ 	updateSelf(deltaTime);
+ 
+ 	if (mDeferPlayViewTransitionTo != nullptr)
+@@ -1113,6 +1151,20 @@ void ViewController::render(const Transform4x4f& parentTrans)
+ 		listTrans.translate(Vector3f(slide - offset, 0, 0) - mColumnSlide.list->getPosition());
+ 		mColumnSlide.list->render(listTrans);
+ 	}
++	else if (mCycleFrom && mCurrentView)
++	{
++		Transform4x4f from = parentTrans;
++		from.translate(-mCycleFrom->getPosition());
++		mCycleFrom->render(from);
++		const int w = Renderer::getScreenWidth();
++		const int reveal = Math::round(w * Math::easeOutCubic(mCycleElapsed / 165.0f));
++		if (reveal > 0)
++		{
++			Renderer::pushClipRect(Vector2i(mCycleDirection > 0 ? w - reveal : 0, 0), Vector2i(reveal, Renderer::getScreenHeight()));
++			mCurrentView->render(trans);
++			Renderer::popClipRect();
++		}
++	}
+ 	else if (!isAnimationPlaying(0) && mCurrentView != nullptr)
+ 	{
+ 		mCurrentView->render(trans);
+diff --git a/es-app/src/views/ViewController.h b/es-app/src/views/ViewController.h
+index 079d37a3..2a321dff 100644
+--- a/es-app/src/views/ViewController.h
++++ b/es-app/src/views/ViewController.h
+@@ -52,6 +52,7 @@ public:
+ 	// Navigation.
+ 	void goToNextGameList();
+ 	void goToPrevGameList();
++	void cycleGameList(SystemData* system, int direction);
+ 	void goToGameList(SystemData* system, bool forceImmediate = false);
+ 	bool goToGameList(const std::string& systemName, bool forceImmediate = false);
+ 	void goToSystemView(SystemData* system, bool forceImmediate = false);
+@@ -157,6 +158,9 @@ private:
+ 	State mState;
+ 
+ 	ColumnSlide mColumnSlide;
++	std::shared_ptr<IGameListView> mCycleFrom;
++	int mCycleElapsed = 0;
++	int mCycleDirection = 1;
+ 	Transform4x4f mScreenTransform;
+ };
+ 
+diff --git a/es-app/src/views/gamelist/GridGameListView.cpp b/es-app/src/views/gamelist/GridGameListView.cpp
+index b01fbd32..81ae83cc 100644
+--- a/es-app/src/views/gamelist/GridGameListView.cpp
++++ b/es-app/src/views/gamelist/GridGameListView.cpp
+@@ -19,7 +19,7 @@ GridGameListView::GridGameListView(Window* window, FolderData* root, const std::
+ 	ISimpleGameListView(window, root),
+ 	mGrid(window),
+ 	mDetails(this, &mGrid, mWindow, DetailedContainer::GridView),
+-	mLetterLabel(window)
++	mLetterLabel(window), mPageProgress(window)
+ {
+ 	// Let DetailedContainer handle extras with activation scripts
+ 	mExtraMode = ThemeData::ExtraImportType::WITHOUT_ACTIVATESTORYBOARD;
+@@ -45,6 +45,8 @@ GridGameListView::GridGameListView(Window* window, FolderData* root, const std::
+ 	mLetterLabel.setZIndex(150);
+ 	mLetterLabel.setVisible(false);
+ 	addChild(&mLetterLabel);
++	mPageProgress.setVisible(false);
++	addChild(&mPageProgress);
+ 	
+ 	if (!themeName.empty())
+ 		setThemeName(themeName);
+@@ -125,7 +127,15 @@ bool GridGameListView::input(InputConfig* config, Input input)
+ 	if (mColumns.hasSlide() && !mPopupSelfReference &&
+ 	    (config->isMappedTo("l2", input) || config->isMappedTo("r2", input)))
+ 	{
+-		if (input.value) mGrid.pageRows(config->isMappedTo("l2", input) ? -1 : 1);
++		const int direction = config->isMappedTo("l2", input) ? -1 : 1;
++		if (input.value && mPageDirection != direction)
++		{
++			mGrid.pageRows(direction);
++			mPageDirection = direction;
++			mPageRepeat = 550;
++		}
++		else if (!input.value && mPageDirection == direction)
++			mPageDirection = 0;
+ 		return true;
+ 	}
+ 
+@@ -140,7 +150,7 @@ bool GridGameListView::input(InputConfig* config, Input input)
+ 			if (config->isMappedTo("pageup", input) || config->isMappedTo("pagedown", input))
+ 			{
+ 				auto dest = SystemView::adjacentConsole(mRoot->getSystem(), config->isMappedTo("pageup", input) ? -1 : 1);
+-				if (dest) ViewController::get()->goToGameList(dest);
++				if (dest) ViewController::get()->cycleGameList(dest, config->isMappedTo("pageup", input) ? -1 : 1);
+ 				return true;
+ 			}
+ 		}
+@@ -183,6 +193,7 @@ void GridGameListView::populateList(const std::vector<FileData*>& files)
+ 
+ 	mGrid.resetLastCursor();
+ 	mGrid.clear();
++	mPageDirection = 0;
+ 	mLetterStarts.clear();
+ 	mLetterBuild = {};
+ 	mLetterDirection = 0;
+@@ -256,6 +267,13 @@ void GridGameListView::onThemeChanged(const std::shared_ptr<ThemeData>& theme)
+ 
+ 	mGrid.applyTheme(theme, getName(), "gamegrid", ThemeFlags::ALL);
+ 	mDetails.onThemeChanged(theme);
++	const auto page = theme->getElement(getName(), "pageProgress", "text");
++	mPageProgress.setVisible(page != nullptr);
++	if (page)
++	{
++		mPageProgress.applyTheme(theme, getName(), "pageProgress", ThemeFlags::ALL);
++		sortChildren();
++	}
+ 	updateInfoPanel();
+ }
+ 
+@@ -271,6 +289,13 @@ void GridGameListView::updateInfoPanel()
+ 	Utils::FileSystem::FileSystemCacheActivator fsc;
+ 
+ 	updateThemeExtrasBindings();
++	if (mPageProgress.isVisible())
++	{
++		const int perPage = std::max(1, mGrid.getColumnCount() * mGrid.pageRowCount());
++		const int count = mGrid.size() == 1 && mGrid.getSelected()->isPlaceHolder() ? 0 : mGrid.size();
++		const int page = count ? mGrid.getCursorIndex() / perPage + 1 : 0;
++		mPageProgress.setText(std::to_string(page) + " / " + std::to_string((count + perPage - 1) / perPage));
++	}
+ 
+ 	FileData* file = (mGrid.size() == 0 || mGrid.isScrolling()) ? NULL : mGrid.getSelected();
+ 	bool isClearing = mGrid.getObjects().size() == 0 && mGrid.getCursorIndex() == 0 && mGrid.getScrollingVelocity() == 0;
+@@ -392,6 +417,7 @@ bool GridGameListView::handleLetterAxis(InputConfig* config, Input input)
+ 
+ void GridGameListView::onHide()
+ {
++	mPageDirection = 0;
+ 	mLetterDirection = 0;
+ 	mLetterDisplay = 0;
+ 	mLetterLabel.setVisible(false);
+@@ -400,7 +426,16 @@ void GridGameListView::onHide()
+ 
+ void GridGameListView::update(int deltaTime)
+ {
+-	if (mWindow->peekGui() != ViewController::get()) mLetterDirection = 0;
++	if (mWindow->peekGui() != ViewController::get())
++		mLetterDirection = mPageDirection = 0;
++	if (mPageDirection && (mPageRepeat -= deltaTime) <= 0)
++	{
++		if (mRoot->getSystem()->getSortId() <= FileSorts::FILENAME_DESCENDING)
++			jumpLetter(mPageDirection);
++		else
++			mGrid.pageRows(mPageDirection);
++		mPageRepeat = 270;
++	}
+ 	if (mLetterDirection && (mLetterRepeat -= deltaTime) <= 0)
+ 	{
+ 		jumpLetter(mLetterDirection);
+diff --git a/es-app/src/views/gamelist/GridGameListView.h b/es-app/src/views/gamelist/GridGameListView.h
+index e5a5ae66..bb5dea44 100644
+--- a/es-app/src/views/gamelist/GridGameListView.h
++++ b/es-app/src/views/gamelist/GridGameListView.h
+@@ -65,6 +65,9 @@ private:
+ 	std::future<LetterStarts> mLetterBuild;
+ 	LetterStarts mLetterStarts;
+ 	TextComponent mLetterLabel;
++	TextComponent mPageProgress;
++	int mPageDirection = 0;
++	int mPageRepeat = 0;
+ 	int mLetterDirection = 0;
+ 	int mLetterRepeat = 0;
+ 	int mLetterDisplay = 0;
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 8c9ada05..5e99f4f2 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -238,6 +238,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 	{ "clock", {} }, // Inherits text
+ 
+ 	{ "notification", {
++		{ "vertical", BOOLEAN },
+ 		{ "y", FLOAT },
+ 		// with a size: the info popups' look and place ("notification") or the volume and brightness meters' ("meters")
+ 		{ "pos", NORMALIZED_PAIR },
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index 39fd590f..fab30037 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -1560,6 +1560,7 @@ static Window::PopupStyle readPopupStyle(const ThemeData::ThemeElement* elem)
+ 		return style;
+ 
+ 	style.enabled = true;
++	style.vertical = elem->has("vertical") && elem->get<bool>("vertical");
+ 	style.size = Vector2f(Math::round(size.x()), Math::round(size.y()));
+ 	style.pos = elem->has("pos") ? elem->get<Vector2f>("pos") * screen : Vector2f::Zero();
+ 	style.font = Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_MINI));
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 66979463..28316b2f 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -124,10 +124,11 @@ public:
+ 	// notification elements "notification" and "meters", when they have a size (in pixels here)
+ 	struct PopupStyle
+ 	{
+-		PopupStyle() : enabled(false), origin(0, 0), color(0xFFFFFFFF), backgroundColor(0x0D1A2BF2), borderColor(0),
++		PopupStyle() : enabled(false), vertical(false), origin(0, 0), color(0xFFFFFFFF), backgroundColor(0x0D1A2BF2), borderColor(0),
+ 			trackColor(0xFFFFFF40), fillColor(0xFFFFFFFF), cornerRadius(0), iconSize(0), spacing(0), maxCount(0) {}
+ 
+ 		bool enabled;
++		bool vertical;
+ 		Vector2f pos;
+ 		Vector2f origin;
+ 		Vector2f size;
+diff --git a/es-core/src/components/VolumeInfoComponent.cpp b/es-core/src/components/VolumeInfoComponent.cpp
+index 75908722..7d955cd2 100644
+--- a/es-core/src/components/VolumeInfoComponent.cpp
++++ b/es-core/src/components/VolumeInfoComponent.cpp
+@@ -75,7 +75,7 @@ VolumeInfoComponent::VolumeInfoComponent(Window* window, bool actionLine)
+ 
+ 		float width = style.size.x();
+ 		float height = style.size.y();
+-		mCornerRadius = style.cornerRadius > 0 ? style.cornerRadius : height / 2.0f;
++		mCornerRadius = style.cornerRadius > 0 ? style.cornerRadius : std::min(width, height) / 2.0f;
+ 
+ 		float padding = Math::round(height * 0.43f);
+ 		float gap = Math::round(height * 0.3f);
+@@ -98,6 +98,15 @@ VolumeInfoComponent::VolumeInfoComponent(Window* window, bool actionLine)
+ 		mLabel->setPosition(width - padding - labelWidth, 0);
+ 		mLabel->setSize(labelWidth, height);
+ 		addChild(mLabel);
++		if (style.vertical)
++		{
++			mGlyph->setPosition(0, 0);
++			const float cap = std::min(width, height / 2.0f);
++			mGlyph->setSize(width, cap * 0.72f);
++			mLabel->setHorizontalAlignment(ALIGN_CENTER);
++			mLabel->setPosition(0, height - cap * 0.65f);
++			mLabel->setSize(width, cap * 0.65f);
++		}
+ 		return;
+ 	}
+ 
+@@ -253,6 +262,20 @@ void VolumeInfoComponent::render(const Transform4x4f& parentTrans)
+ 		Renderer::drawSolidRectangle(0, 0, mSize.x(), mSize.y(), withOpacity(mBackgroundColor), withOpacity(mBorderColor),
+ 			(mBorderColor & 0xFF) ? 1.0f : 0.0f, mCornerRadius);
+ 
++		if (mWindow->getMeterStyle().vertical)
++		{
++			const float width = Math::round(mSize.x() * 0.25f);
++			const float x = Math::round((mSize.x() - width) / 2);
++			const float y = Math::round(mGlyph->getSize().y());
++			const float length = std::max(1.0f, mLabel->getPosition().y() - y);
++			const float fill = Math::round(length * Math::max(0, Math::min(100, mVolume)) / 100.0f);
++			Renderer::drawSolidRectangle(x, y, width, length, withOpacity(mTrackColor), 0, 0, width / 2);
++			if (fill > 0)
++				Renderer::drawSolidRectangle(x, y + length - fill, width, fill, withOpacity(mFillColor), 0, 0, std::min(width, fill) / 2);
++			GuiComponent::renderChildren(trans);
++			return;
++		}
++
+ 		float h = Math::max(2.0f, Math::round(mSize.y() * 0.143f));
+ 		float y = Math::round((mSize.y() - h) / 2.0f);
+ 		Renderer::drawSolidRectangle(mBarX, y, mBarWidth, h, withOpacity(mTrackColor), 0, 0, h / 2.0f);

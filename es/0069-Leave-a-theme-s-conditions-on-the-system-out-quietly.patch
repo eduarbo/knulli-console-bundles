@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:06:10 +0000
+Subject: [PATCH] Leave a theme's conditions on the system out quietly without
+ one
+
+A theme is also read without a system, for the menus. A condition on
+a system variable ({system.name} == 'x', in a variables block or on a
+property) then has nothing to compare and was logged as an invalid
+expression, once per condition at every theme load. It is left out
+as before, with a debug line instead of an error.
+---
+ es-core/src/ThemeData.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 49be5398..dd3a7339 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -1210,7 +1210,14 @@ bool ThemeData::parseFilterAttributes(const pugi::xml_node& node)
+ 			}
+ 			catch (std::domain_error& e)
+ 			{
+-				LOG(LogError) << "if \"" << ifAttribute << "\" expression is invalid : " << e.what();
++				// A theme read without a system (the menus' theme) has no system variables: a condition on one only
++				// leaves its part out there
++				if (mEvaluatorVariables.find("system.name") == mEvaluatorVariables.cend() && ifAttribute.find("{system.") != std::string::npos &&
++					std::string(e.what()).find("Unable to find the variable 'system.") == 0)
++					LOG(LogDebug) << "if \"" << ifAttribute << "\" left out: no system";
++				else
++					LOG(LogError) << "if \"" << ifAttribute << "\" expression is invalid : " << e.what();
++
+ 				return false;
+ 			}
+ 		}

@@ -1,0 +1,717 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:11:25 +0000
+Subject: [PATCH] Let a theme style and place the info popups and the meters
+
+The info popups (a notice sent through the API, a song's title) were
+drawn in the menu's frame and font at the top centre, one under the
+other with no limit, over whatever the theme draws there; the volume
+and brightness meters were vertical bars in the top left corner with
+no sign of which one changed and a track and fill of nearly the same
+colour.
+
+With a size, the screen view's notification element named
+"notification" places the popups (pos, origin, spacing) and draws
+them as a box of the theme's (font, colours, border, corner radius,
+an icon) with the text on one line; maxCount caps those shown at
+once, the next one showing when one ends. One named "meters" draws
+each meter as a pill with its glyph (a speaker or a sun), a
+horizontal bar in the theme's track and fill colours and the level,
+side by side when both show. Both are drawn over the screen's extras.
+Without these elements nothing changes.
+---
+ THEMES.md                                     |  37 +++++
+ es-core/src/ThemeData.cpp                     |  18 ++-
+ es-core/src/Window.cpp                        | 134 +++++++++++++++++-
+ es-core/src/Window.h                          |  32 +++++
+ .../components/BrightnessInfoComponent.cpp    |   6 +
+ .../src/components/BrightnessInfoComponent.h  |   1 +
+ .../src/components/VolumeInfoComponent.cpp    |  84 ++++++++++-
+ es-core/src/components/VolumeInfoComponent.h  |  18 ++-
+ es-core/src/guis/GuiInfoPopup.cpp             |  70 ++++++++-
+ es-core/src/guis/GuiInfoPopup.h               |  13 ++
+ 10 files changed, 402 insertions(+), 11 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 3e122e99..29be6e57 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1671,6 +1671,43 @@ BATOCERA 5.24 - controllerActivity element must be defined in screen view
+ 
+   - z-index value for component.  Components will be rendered in order of z-index value from low to high.
+ 
++#### notification
++
++Defined in the screen view.  `<notification name="notification">` styles the info popups (a message, a song's
++title, a notice sent through the API); `<notification name="meters">` the volume and brightness meters.  Without a
++size, ES draws its default ones.
++
++* `y` - type: FLOAT.
++
++  - "notification" only: top of the background jobs' notifications (top right), as a fraction of the screen's height.  Default is 0.02.
++
++* `size` - type: NORMALIZED_PAIR.
++
++  - A popup's largest width and its height (a meter's width and height).
++
++* `pos`, `origin` - type: NORMALIZED_PAIR.
++
++  - Where the first popup goes and which of its points sits there (`1 0`: its top right corner).  Popups go one
++    under the other, `spacing` apart; with both meters showing, they go side by side around that place.
++
++* `fontPath`, `fontSize` - The text (a meter's level).
++
++* `color`, `backgroundColor`, `borderColor` - type: COLOR.
++
++  - The text and the glyphs, the box under them and its 1 px border (none when transparent).
++
++* `cornerSize` - type: FLOAT.  The box's corner radius, as a fraction of the screen's height (meters: half their height by default).
++
++* `iconPath` - type: PATH.  "notification": an icon before the text.
++
++* `iconSize` - type: FLOAT.  The icon's or the meter glyph's size, as a fraction of the screen's height.
++
++* `spacing` - type: FLOAT.  The gap between popups, as a fraction of the screen's height.
++
++* `maxCount` - type: FLOAT.  "notification": popups shown at once; the next one shows when one ends, and the first gives way after 2.5 s when others wait.
++
++* `trackColor`, `fillColor` - type: COLOR.  "meters": the bar's track and its fill up to the level.
++
+   
+ 
+ 
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index e395d02a..af6be0f6 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -236,7 +236,23 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 	{ "clock", {} }, // Inherits text
+ 
+ 	{ "notification", {
+-		{ "y", FLOAT } } },
++		{ "y", FLOAT },
++		// with a size: the info popups' look and place ("notification") or the volume and brightness meters' ("meters")
++		{ "pos", NORMALIZED_PAIR },
++		{ "origin", NORMALIZED_PAIR },
++		{ "size", NORMALIZED_PAIR },
++		{ "fontPath", PATH },
++		{ "fontSize", FLOAT },
++		{ "color", COLOR },
++		{ "backgroundColor", COLOR },
++		{ "borderColor", COLOR },
++		{ "trackColor", COLOR },
++		{ "fillColor", COLOR },
++		{ "cornerSize", FLOAT },
++		{ "iconPath", PATH },
++		{ "iconSize", FLOAT },
++		{ "spacing", FLOAT },
++		{ "maxCount", FLOAT } } },
+ 
+ 	{ "networkIcon", {  // Inherits image
+ 		{ "networkIcon", PATH },
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index db7ebe16..bd5da502 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -371,12 +371,32 @@ void Window::stopNotificationPopups()
+ 	PowerSaver::resume();
+ }
+ 
++// With a theme's cap on the popups shown at once, the first one gives way after a while to those waiting; a
++// waiting one's time starts when it shows
++#define POPUP_WAITING_MS 2500
++
++int Window::shownNotificationCount() const
++{
++	int count = (int)mNotificationPopups.size();
++	if (mNoticeStyle.enabled && mNoticeStyle.maxCount > 0)
++		count = std::min(count, mNoticeStyle.maxCount);
++
++	return count;
++}
++
+ void Window::updateNotificationPopups(int deltaTime)
+ {
+ 	bool changed = false;
+ 
++	int shown = shownNotificationCount();
++	if (shown > 0 && shown < (int)mNotificationPopups.size())
++		mNotificationPopups.front()->shorten(POPUP_WAITING_MS);
++
+ 	for (int i = mNotificationPopups.size() - 1 ; i >= 0 ; i--)
+ 	{
++		if (i >= shown)
++			continue;
++
+ 		mNotificationPopups[i]->update(deltaTime);
+ 
+ 		if (!mNotificationPopups[i]->isRunning())
+@@ -404,6 +424,32 @@ void Window::updateNotificationPopups(int deltaTime)
+ 
+ void Window::layoutNotificationPopups()
+ {
++	if (mNoticeStyle.enabled)
++	{
++		// From the theme's place, one under the other; one going away lets the next ones move up
++		float posY = mNoticeStyle.pos.y() - mNoticeStyle.size.y() * mNoticeStyle.origin.y();
++		int shown = shownNotificationCount();
++
++		for (int i = 0; i < shown; i++)
++		{
++			auto popup = mNotificationPopups[i];
++			float offset = popup->getSize().y() + mNoticeStyle.spacing;
++
++			float fadingOut = popup->getFadeOut();
++			if (fadingOut != 0)
++			{
++				fadingOut = fadingOut - 1;
++				fadingOut = Math::lerp(0, 1, fadingOut * fadingOut * fadingOut + 1);
++				posY -= offset * fadingOut;
++			}
++
++			popup->setPosition(Math::round(mNoticeStyle.pos.x() - popup->getSize().x() * mNoticeStyle.origin.x()), Math::round(posY), 0);
++			posY += offset;
++		}
++
++		return;
++	}
++
+ 	float posY = Renderer::getScreenHeight() * 0.02f;
+ 	int paddingY = (int)posY;
+ 
+@@ -791,8 +837,9 @@ void Window::render()
+ 	// Render notifications
+ 	if (!mRenderScreenSaver)
+ 	{
+-		for (auto popup : mNotificationPopups)
+-			popup->render(transform);
++		if (!mNoticeStyle.enabled)
++			for (auto popup : mNotificationPopups)
++				popup->render(transform);
+ 
+ 		renderAsyncNotifications(transform);
+ 	}
+@@ -813,6 +860,33 @@ void Window::render()
+ 		for (auto extra : mScreenExtras)
+ 			if (!menuOver || extra->isKindOf<PostProcessShaderComponent>())
+ 				extra->render(transform);
++
++		// A theme's popups go over the screen's extras (its status line)
++		if (mNoticeStyle.enabled)
++		{
++			int shown = shownNotificationCount();
++			for (int i = 0; i < shown; i++)
++				mNotificationPopups[i]->render(transform);
++		}
++	}
++
++	if (mMeterStyle.enabled && mVolumeInfo && mBrightnessInfo)
++	{
++		// The theme's place for one meter; both showing, side by side around it
++		bool both = mVolumeInfo->isShowing() && mBrightnessInfo->isShowing();
++		float width = mMeterStyle.size.x();
++		float x = mMeterStyle.pos.x() - (both ? 2 * width + mMeterStyle.spacing : width) * mMeterStyle.origin.x();
++		float y = mMeterStyle.pos.y() - mMeterStyle.size.y() * mMeterStyle.origin.y();
++
++		if (mVolumeInfo->isShowing())
++		{
++			mVolumeInfo->setPosition(Math::round(x), Math::round(y), 0);
++			if (both)
++				x += width + mMeterStyle.spacing;
++		}
++
++		if (mBrightnessInfo->isShowing())
++			mBrightnessInfo->setPosition(Math::round(x), Math::round(y), 0);
+ 	}
+ 
+ 	if (mVolumeInfo && Settings::VolumePopup())
+@@ -1460,6 +1534,59 @@ void Window::processPostedFunctions()
+ 		TRYCATCH("processPostedFunction", func.func())
+ }
+ 
++// A screen view's notification element with a size: the look and place of the popups it styles
++static Window::PopupStyle readPopupStyle(const ThemeData::ThemeElement* elem)
++{
++	Window::PopupStyle style;
++	if (elem == nullptr || !elem->has("size"))
++		return style;
++
++	Vector2f screen((float)Renderer::getScreenWidth(), (float)Renderer::getScreenHeight());
++	Vector2f size = elem->get<Vector2f>("size") * screen;
++	if (size.x() <= 0 || size.y() <= 0)
++		return style;
++
++	style.enabled = true;
++	style.size = Vector2f(Math::round(size.x()), Math::round(size.y()));
++	style.pos = elem->has("pos") ? elem->get<Vector2f>("pos") * screen : Vector2f::Zero();
++	style.font = Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_MINI));
++
++	if (elem->has("origin"))
++		style.origin = elem->get<Vector2f>("origin");
++
++	if (elem->has("color"))
++		style.color = elem->get<unsigned int>("color");
++
++	if (elem->has("backgroundColor"))
++		style.backgroundColor = elem->get<unsigned int>("backgroundColor");
++
++	if (elem->has("borderColor"))
++		style.borderColor = elem->get<unsigned int>("borderColor");
++
++	if (elem->has("trackColor"))
++		style.trackColor = elem->get<unsigned int>("trackColor");
++
++	if (elem->has("fillColor"))
++		style.fillColor = elem->get<unsigned int>("fillColor");
++
++	if (elem->has("cornerSize"))
++		style.cornerRadius = Math::round(elem->get<float>("cornerSize") * screen.y());
++
++	if (elem->has("iconPath"))
++		style.iconPath = elem->get<std::string>("iconPath");
++
++	if (elem->has("iconSize"))
++		style.iconSize = Math::round(elem->get<float>("iconSize") * screen.y());
++
++	if (elem->has("spacing"))
++		style.spacing = Math::round(elem->get<float>("spacing") * screen.y());
++
++	if (elem->has("maxCount"))
++		style.maxCount = std::max(0, (int)elem->get<float>("maxCount"));
++
++	return style;
++}
++
+ void Window::onThemeChanged(const std::shared_ptr<ThemeData>& theme)
+ {
+ 	applyThemeOptions(theme);
+@@ -1484,6 +1611,9 @@ void Window::onThemeChanged(const std::shared_ptr<ThemeData>& theme)
+ 		mNotificationOffsetY = 0.02f;
+ 	}
+ 
++	mNoticeStyle = readPopupStyle(elem);
++	mMeterStyle = readPopupStyle(theme->getElement("screen", "meters", "notification"));
++
+ 	if (mClock)
+ 	{
+ 		mClock->setFont(Font::get(FONT_SIZE_SMALL));
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 2750efdc..41eef146 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -120,6 +120,33 @@ public:
+ 
+ 	void onThemeChanged(const std::shared_ptr<ThemeData>& theme);
+ 
++	// A theme's look and place for the info popups and for the volume and brightness meters: the screen view's
++	// notification elements "notification" and "meters", when they have a size (in pixels here)
++	struct PopupStyle
++	{
++		PopupStyle() : enabled(false), origin(0, 0), color(0xFFFFFFFF), backgroundColor(0x0D1A2BF2), borderColor(0),
++			trackColor(0xFFFFFF40), fillColor(0xFFFFFFFF), cornerRadius(0), iconSize(0), spacing(0), maxCount(0) {}
++
++		bool enabled;
++		Vector2f pos;
++		Vector2f origin;
++		Vector2f size;
++		std::shared_ptr<Font> font;
++		std::string iconPath;
++		unsigned int color;
++		unsigned int backgroundColor;
++		unsigned int borderColor;
++		unsigned int trackColor;
++		unsigned int fillColor;
++		float cornerRadius;
++		float iconSize;
++		float spacing;
++		int maxCount;
++	};
++
++	const PopupStyle& getNoticeStyle() const { return mNoticeStyle; }
++	const PopupStyle& getMeterStyle() const { return mMeterStyle; }
++
+ 	std::shared_ptr<BatteryIndicatorComponent>	getBatteryIndicator() { return mBatteryIndicator; }
+ 
+ 	AsyncNotificationComponent* createAsyncNotificationComponent(bool actionLine = false);
+@@ -192,6 +219,11 @@ private:
+ 	std::shared_ptr<BatteryIndicatorComponent>	mBatteryIndicator;	
+ 
+ 	float mNotificationOffsetY = 0.02f;
++	PopupStyle mNoticeStyle;
++	PopupStyle mMeterStyle;
++
++	// The info popups shown at once (a theme's style can cap them; the others wait)
++	int shownNotificationCount() const;
+ 
+ 	bool mNormalizeNextUpdate;
+ 
+diff --git a/es-core/src/components/BrightnessInfoComponent.cpp b/es-core/src/components/BrightnessInfoComponent.cpp
+index ce34dbd4..cdbbc222 100644
+--- a/es-core/src/components/BrightnessInfoComponent.cpp
++++ b/es-core/src/components/BrightnessInfoComponent.cpp
+@@ -1,4 +1,5 @@
+ #include "BrightnessInfoComponent.h"
++#include "LocaleES.h"
+ #include "math/Misc.h"
+ #include "utils/FileSystemUtil.h"
+ #include "utils/StringUtil.h"
+@@ -77,6 +78,11 @@ BrightnessInfoComponent::~BrightnessInfoComponent()
+ #endif
+ }
+ 
++std::string BrightnessInfoComponent::glyph(int level)
++{
++	return _U("\uF185"); // a sun
++}
++
+ int BrightnessInfoComponent::readLevel()
+ {
+ 	if (mBrightnessPath.empty() && mDispFd < 0)
+diff --git a/es-core/src/components/BrightnessInfoComponent.h b/es-core/src/components/BrightnessInfoComponent.h
+index ba3af72c..595a8189 100644
+--- a/es-core/src/components/BrightnessInfoComponent.h
++++ b/es-core/src/components/BrightnessInfoComponent.h
+@@ -15,6 +15,7 @@ public:
+ 
+ protected:
+ 	int readLevel() override;
++	std::string glyph(int level) override;
+ 	bool showChange() override;
+ 
+ private:
+diff --git a/es-core/src/components/VolumeInfoComponent.cpp b/es-core/src/components/VolumeInfoComponent.cpp
+index 1acd2e56..75908722 100644
+--- a/es-core/src/components/VolumeInfoComponent.cpp
++++ b/es-core/src/components/VolumeInfoComponent.cpp
+@@ -1,4 +1,6 @@
+ #include "VolumeInfoComponent.h"
++#include "resources/Font.h"
++#include "renderers/Renderer.h"
+ #include "ThemeData.h"
+ #include "PowerSaver.h"
+ #include "components/ComponentGrid.h"
+@@ -53,12 +55,52 @@ static unsigned int blendColor(unsigned int color, unsigned int background, int
+ }
+ 
+ VolumeInfoComponent::VolumeInfoComponent(Window* window, bool actionLine)
+-	: GuiComponent(window)
++	: GuiComponent(window), mFrame(nullptr), mLabel(nullptr), mThemed(false), mBackgroundColor(0), mBorderColor(0),
++	mTrackColor(0), mCornerRadius(0), mGlyph(nullptr), mBarX(0), mBarWidth(0)
+ {
+ 	mDisplayTime = -1;
+ 	mVolume = -1;
+ 	mCheckTime = 0;
+ 
++	const Window::PopupStyle& style = window->getMeterStyle();
++	if (style.enabled && style.font)
++	{
++		// The theme's pill: the glyph (volume or brightness), a horizontal bar and the level
++		mThemed = true;
++		mBackgroundColor = style.backgroundColor;
++		mBorderColor = style.borderColor;
++		mTrackColor = style.trackColor;
++		mFillColor = style.fillColor;
++		mTrackDivider = 1;
++
++		float width = style.size.x();
++		float height = style.size.y();
++		mCornerRadius = style.cornerRadius > 0 ? style.cornerRadius : height / 2.0f;
++
++		float padding = Math::round(height * 0.43f);
++		float gap = Math::round(height * 0.3f);
++		float glyphSize = style.iconSize > 0 ? style.iconSize : Math::round(height * 0.5f);
++		float labelWidth = Math::round(style.font->sizeText("100 %").x());
++
++		mBarX = padding + glyphSize + gap;
++		mBarWidth = Math::max(8.0f, width - mBarX - gap - labelWidth - padding);
++		setSize(width, height);
++
++		// the glyphs come from the icon font ES falls back to, at the theme's icon size
++		float scale = Renderer::ScreenSettings::fontScale();
++		int glyphFontSize = Math::max(1, (int)Math::round(glyphSize / (scale > 0 ? scale : 1.0f)));
++		mGlyph = new TextComponent(mWindow, "", Font::get(glyphFontSize, style.font->getPath()), style.color, ALIGN_CENTER);
++		mGlyph->setPosition(padding, 0);
++		mGlyph->setSize(glyphSize, height);
++		addChild(mGlyph);
++
++		mLabel = new TextComponent(mWindow, "", style.font, style.color, ALIGN_RIGHT);
++		mLabel->setPosition(width - padding - labelWidth, 0);
++		mLabel->setSize(labelWidth, height);
++		addChild(mLabel);
++		return;
++	}
++
+ 	auto theme = ThemeData::getMenuTheme();	
+ 
+ 	auto font = theme->TextSmall.font;
+@@ -108,6 +150,9 @@ VolumeInfoComponent::VolumeInfoComponent(Window* window, bool actionLine)
+ 
+ void VolumeInfoComponent::moveToSlot(int slot)
+ {
++	if (mThemed)
++		return;
++
+ 	// FCA TopLeft
+ 	float posX = Renderer::getScreenWidth() * 0.02f + slot * (mSize.x() + Renderer::getScreenWidth() * 0.01f);
+ 	float posY = Renderer::getScreenHeight() * 0.04f;
+@@ -120,8 +165,14 @@ int VolumeInfoComponent::readLevel()
+ 	return VolumeControl::getInstance()->getVolume();
+ }
+ 
++std::string VolumeInfoComponent::glyph(int level)
++{
++	return level == 0 ? _U("\uF026") : _U("\uF028"); // a speaker, muted or not
++}
++
+ VolumeInfoComponent::~VolumeInfoComponent()
+ {
++	delete mGlyph;
+ 	delete mLabel;
+ 	delete mFrame;
+ }
+@@ -158,7 +209,12 @@ void VolumeInfoComponent::update(int deltaTime)
+ 
+ 		mVolume = volume;
+ 
+-		if (mVolume == 0)
++		if (mThemed)
++		{
++			mGlyph->setText(glyph(mVolume));
++			mLabel->setText(std::to_string(mVolume) + " %");
++		}
++		else if (mVolume == 0)
+ 			mLabel->setText("X");
+ 		else
+ 			mLabel->setText(std::to_string(mVolume) + "%");
+@@ -184,6 +240,30 @@ void VolumeInfoComponent::render(const Transform4x4f& parentTrans)
+ 	auto theme = ThemeData::getMenuTheme();
+ 
+ 	int opacity = 255 - Math::max(0, (mDisplayTime - VISIBLE_TIME) * 255 / FADE_TIME);
++
++	if (mThemed)
++	{
++		// fades in place: the pill, the bar's track and fill, the glyph and the level
++		setOpacity(opacity);
++
++		auto withOpacity = [opacity](unsigned int color) { return (color & 0xFFFFFF00) | ((color & 0xFF) * opacity / 255); };
++
++		Transform4x4f trans = parentTrans * getTransform();
++		Renderer::setMatrix(trans);
++		Renderer::drawSolidRectangle(0, 0, mSize.x(), mSize.y(), withOpacity(mBackgroundColor), withOpacity(mBorderColor),
++			(mBorderColor & 0xFF) ? 1.0f : 0.0f, mCornerRadius);
++
++		float h = Math::max(2.0f, Math::round(mSize.y() * 0.143f));
++		float y = Math::round((mSize.y() - h) / 2.0f);
++		Renderer::drawSolidRectangle(mBarX, y, mBarWidth, h, withOpacity(mTrackColor), 0, 0, h / 2.0f);
++
++		float fill = Math::round(mBarWidth * Math::max(0, Math::min(100, mVolume)) / 100.0f);
++		if (fill > 0)
++			Renderer::drawSolidRectangle(mBarX, y, fill, h, withOpacity(mFillColor), 0, 0, h / 2.0f);
++
++		GuiComponent::renderChildren(trans);
++		return;
++	}
+ 	setOpacity(opacity);
+ 	setScale(opacity / 255.0f);
+ 
+diff --git a/es-core/src/components/VolumeInfoComponent.h b/es-core/src/components/VolumeInfoComponent.h
+index 320abef2..621d2e94 100644
+--- a/es-core/src/components/VolumeInfoComponent.h
++++ b/es-core/src/components/VolumeInfoComponent.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <mutex>
++#include <string>
+ #include "GuiComponent.h"
+ 
+ class ComponentGrid;
+@@ -19,13 +20,18 @@ public:
+ 
+ 	void reset() { mVolume = -1; }
+ 
++	// Shown (fading out included)
++	bool isShowing() const { return mDisplayTime >= 0; }
++
+ protected:
+ 	// Level shown by the popup, in percent, or -1 when there is none
+ 	virtual int readLevel();
+ 	// False to take a new level without showing the popup
+ 	virtual bool showChange() { return true; }
+-	// Horizontal place of the popup: 0 is the top left corner, 1 is next to it
++	// Horizontal place of the popup: 0 is the top left corner, 1 is next to it (in a theme's style, the window places it)
+ 	void moveToSlot(int slot);
++	// In a theme's style: the glyph before the bar for a level
++	virtual std::string glyph(int level);
+ 
+ private:
+ 	NinePatchComponent* mFrame;
+@@ -38,4 +44,14 @@ private:
+ 
+ 	unsigned int mFillColor;
+ 	int mTrackDivider;
++
++	// In a theme's style (Window::PopupStyle): a pill with a glyph, a horizontal bar and the level
++	bool mThemed;
++	unsigned int mBackgroundColor;
++	unsigned int mBorderColor;
++	unsigned int mTrackColor;
++	float mCornerRadius;
++	TextComponent* mGlyph;
++	float mBarX;
++	float mBarWidth;
+ };
+\ No newline at end of file
+diff --git a/es-core/src/guis/GuiInfoPopup.cpp b/es-core/src/guis/GuiInfoPopup.cpp
+index 6f0ba2db..3e92aefb 100644
+--- a/es-core/src/guis/GuiInfoPopup.cpp
++++ b/es-core/src/guis/GuiInfoPopup.cpp
+@@ -1,18 +1,60 @@
+ #include "guis/GuiInfoPopup.h"
+ 
+ #include "components/ComponentGrid.h"
++#include "components/ImageComponent.h"
+ #include "components/NinePatchComponent.h"
+ #include "components/TextComponent.h"
+ #include <SDL_timer.h>
+ #include "TextToSpeech.h"
+ 
+ GuiInfoPopup::GuiInfoPopup(Window* window, std::string message, int duration) :
+-	GuiComponent(window), mMessage(message), mDuration(duration), mRunning(true), mFadeOut(0)
++	GuiComponent(window), mMessage(message), mDuration(duration), mRunning(true), mFadeOut(0),
++	mGrid(nullptr), mFrame(nullptr), mThemed(false), mBackgroundColor(0), mBorderColor(0), mCornerRadius(0)
+ {
+ 	auto theme = ThemeData::getMenuTheme();
+ 
+ 	TextToSpeech::getInstance()->say(message, true);
+ 
++	// we only init the actual time when we first start to render
++	mStartTime = 0;
++
++	const Window::PopupStyle& style = window->getNoticeStyle();
++	if (style.enabled && style.font)
++	{
++		// The theme's box: as tall as its style, as wide as the text needs up to the style's width; the icon, then
++		// the text on one line (cut with an ellipsis). The window places it.
++		mThemed = true;
++		mBackgroundColor = style.backgroundColor;
++		mBorderColor = style.borderColor;
++		mCornerRadius = style.cornerRadius;
++
++		float height = style.size.y();
++		float padding = Math::round(height * 0.4f);
++		float gap = Math::round(height * 0.28f);
++		float icon = style.iconPath.empty() ? 0.0f : (style.iconSize > 0 ? style.iconSize : Math::round(height * 0.5f));
++		float textX = padding + (icon > 0 ? icon + gap : 0.0f);
++		float textWidth = Math::max(0.0f, Math::min(style.font->sizeText(message).x(), style.size.x() - textX - padding));
++
++		if (icon > 0)
++		{
++			mIcon = std::make_shared<ImageComponent>(window);
++			mIcon->setImage(style.iconPath);
++			mIcon->setOrigin(0.5f, 0.5f);
++			mIcon->setMaxSize(icon, icon);
++			mIcon->setPosition(padding + icon / 2.0f, height / 2.0f);
++			addChild(mIcon.get());
++		}
++
++		mText = std::make_shared<TextComponent>(window, message, style.font, style.color, ALIGN_LEFT);
++		mText->setMultiLine(TextComponent::MultiLineType::SINGLELINE);
++		mText->setPosition(textX, 0);
++		mText->setSize(textWidth, height);
++		addChild(mText.get());
++
++		mSize = Vector2f(textX + textWidth + padding, height);
++		return;
++	}
++
+ 	mFrame = new NinePatchComponent(window);
+ 	float maxWidth = Renderer::getScreenWidth() * 0.9f;
+ 	float maxHeight = Renderer::getScreenHeight() * 0.2f;
+@@ -57,9 +99,6 @@ GuiInfoPopup::GuiInfoPopup(Window* window, std::string message, int duration) :
+ 	mFrame->fitTo(mSize, Vector3f::Zero(), Vector2f(-32, -32));
+ 	addChild(mFrame);
+ 
+-	// we only init the actual time when we first start to render
+-	mStartTime = 0;
+-
+ 	mGrid = new ComponentGrid(window, Vector2i(1, 3));
+ 	mGrid->setSize(mSize);
+ 	mGrid->setEntry(s, Vector2i(0, 1), false, true);
+@@ -75,9 +114,27 @@ void GuiInfoPopup::render(const Transform4x4f& /*parentTrans*/)
+ 	Transform4x4f trans = getTransform() * Transform4x4f::Identity();
+ 
+ 	Renderer::setMatrix(trans);
++
++	if (mThemed)
++	{
++		auto withOpacity = [this](unsigned int color) { return (color & 0xFFFFFF00) | ((color & 0xFF) * getOpacity() / 255); };
++		Renderer::drawSolidRectangle(0, 0, mSize.x(), mSize.y(), withOpacity(mBackgroundColor), withOpacity(mBorderColor),
++			(mBorderColor & 0xFF) ? 1.0f : 0.0f, mCornerRadius);
++	}
++
+ 	renderChildren(trans);	
+ }
+ 
++void GuiInfoPopup::shorten(int ms)
++{
++	if (!mRunning || mStartTime == 0)
++		return;
++
++	int elapsed = SDL_GetTicks() - mStartTime;
++	if (mDuration - elapsed > ms)
++		mDuration = elapsed + ms;
++}
++
+ void GuiInfoPopup::update(int deltaTime)
+ {
+ 	GuiComponent::update(deltaTime);
+@@ -111,5 +168,8 @@ void GuiInfoPopup::update(int deltaTime)
+ 	alpha = (int) (Math::easeOutCubic(alpha / 255.0f) * 255.0f);
+ 
+ 	setOpacity((unsigned char)alpha);
+-	setScale(alpha / 255.0f);
++
++	// a theme's box fades in place
++	if (!mThemed)
++		setScale(alpha / 255.0f);
+ }
+diff --git a/es-core/src/guis/GuiInfoPopup.h b/es-core/src/guis/GuiInfoPopup.h
+index 0cf00217..bc77702f 100644
+--- a/es-core/src/guis/GuiInfoPopup.h
++++ b/es-core/src/guis/GuiInfoPopup.h
+@@ -6,7 +6,9 @@
+ #include "Window.h"
+ 
+ class ComponentGrid;
++class ImageComponent;
+ class NinePatchComponent;
++class TextComponent;
+ 
+ class GuiInfoPopup : public GuiComponent
+ {
+@@ -19,6 +21,9 @@ public:
+ 	float getFadeOut() { return mFadeOut; }
+ 	bool isRunning() { return mRunning; };
+ 
++	// Gives way sooner, another one waiting: at most that much longer
++	void shorten(int ms);
++
+ 	std::string         getMessage() { return mMessage; }
+ 
+ private:
+@@ -32,6 +37,14 @@ private:
+ 
+ 	ComponentGrid*      mGrid;
+ 	NinePatchComponent* mFrame;
++
++	// In a theme's style (Window::PopupStyle): a box with an icon and the text on one line
++	bool                mThemed;
++	unsigned int        mBackgroundColor;
++	unsigned int        mBorderColor;
++	float               mCornerRadius;
++	std::shared_ptr<ImageComponent> mIcon;
++	std::shared_ptr<TextComponent>  mText;
+ };
+ 
+ #endif // ES_APP_GUIS_GUI_INFO_POPUP_H

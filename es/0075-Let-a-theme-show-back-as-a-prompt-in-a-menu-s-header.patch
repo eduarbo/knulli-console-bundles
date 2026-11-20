@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:42:45 +0000
+Subject: [PATCH] Let a theme show back as a prompt in a menu's header
+
+Every settings menu ended with a VOLVER button floating at its
+bottom, a button for what the pad's back button already does.
+
+A menuPrompt element (the back button's image, a font and a colour)
+makes a menu show that image and BACK right of its title instead of
+adding a BACK button; a screen's other buttons stay. Every menu
+already goes back with the back button. Without the element menus
+keep their BACK button.
+---
+ THEMES.md                                | 15 +++++++
+ es-core/src/ThemeData.cpp                | 13 ++++++
+ es-core/src/ThemeData.h                  |  9 ++++
+ es-core/src/components/MenuComponent.cpp | 57 ++++++++++++++++++++++++
+ es-core/src/components/MenuComponent.h   |  4 ++
+ 5 files changed, 98 insertions(+)
+
+diff --git a/THEMES.md b/THEMES.md
+index 07b1fef1..35d1dccf 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -836,6 +836,8 @@ ES versions with slides support the feature `slideshow`.
+ 	- Images for menu buttons
+ * `menuTextEdit name="menutextedit"` - ACTIVE | INACTIVE | FONTPATH | FONTSIZE | CARETCOLOR
+ 	- The text field of the on-screen keyboard and other text popups
++* `menuPrompt name="menuprompt"` - PATH | FONTPATH | FONTSIZE | COLOR
++	- The back prompt right of a menu's title, instead of a BACK button
+ * `menuTile name="menutile"` - PATH | SELECTEDPATH | CORNERSIZE
+ 	- The tiles of a menu's image grid (the save states)
+ * `menuKeyboard name="menukeyboard"` - PATH | FOCUSEDPATH | ACTIVEPATH | CORNERSIZE | SPACING | FONTPATH | FONTSIZE | COLOR | SELECTEDCOLOR | WORDKEYS | FOCUSKEYS
+@@ -1518,6 +1520,19 @@ BATOCERA 5.24 - replace the textbox background images in OSK
+   - The caret's colour, kept at full strength while the field is not edited (the on-screen keyboard types into
+     it from its keys). Default: the menu text's colour, dimmed while the field is not edited.
+ 
++#### menuPrompt
++
++A back prompt right of a menu's title (`menuPrompt name="menuprompt"`), instead of the BACK button at its bottom:
++the image and BACK in the catalogue, written with a first capital. Without `path` menus keep their BACK button.
++
++* `path` - type: PATH.
++  - The back button's image, as high as 1.6 times the text's letter height.
++* `fontPath` - type: PATH.
++* `fontSize` - type: FLOAT.
++  - Default: `menutextsmall`'s font.
++* `color` - type: COLOR.
++  - Default: `menutextsmall`'s colour.
++
+ #### menuTile
+ 
+ The tiles of a menu's image grid, the save states' (`menuTile name="menutile"`). Without `path` and `selectedPath`
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 9a057ce7..6a732b5d 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -691,6 +691,11 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "fontPath", PATH },
+ 		{ "fontSize", FLOAT },
+ 		{ "caretColor", COLOR } } },
++	{ "menuPrompt",{
++		{ "path", PATH },
++		{ "fontPath", PATH },
++		{ "fontSize", FLOAT },
++		{ "color", COLOR } } },
+ 	{ "menuTile",{
+ 		{ "path", PATH },
+ 		{ "selectedPath", PATH },
+@@ -2481,6 +2486,14 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			Row.fullRows = elem->get<bool>("fullRows");
+ 	}
+ 
++	elem = theme->getElement("menu", "menuprompt", "menuPrompt");
++	if (elem && elem->has("path") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("path")))
++	{
++		Prompt.path = elem->get<std::string>("path");
++		Prompt.font = (elem->has("fontPath") || elem->has("fontSize")) ? Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_SMALL), true) : TextSmall.font;
++		Prompt.color = elem->has("color") ? elem->get<unsigned int>("color") : TextSmall.color;
++	}
++
+ 
+ 	elem = theme->getElement("menu", "menugroup", "menuGroup");
+ 	if (elem)
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index fe1a84b0..4818788f 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -185,6 +185,14 @@ struct MenuRowElement
+ 	bool fullRows;	// lists show whole rows only
+ };
+ 
++// A prompt in a menu's header (menuPrompt): back, instead of a BACK button
++struct PromptElement
++{
++	std::string path;			// the back button's image
++	std::shared_ptr<Font> font;
++	unsigned int color;
++};
++
+ // The text field of the on-screen keyboard and of other text popups (menuTextEdit)
+ struct TextEditElement
+ {
+@@ -235,6 +243,7 @@ public:
+ 		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16), 0, 0, 0.0f };
+ 		TextEditElement TextEdit { nullptr, 0 };
+ 		MenuRowElement Row { 0.0f, 10.0f, 0.0f, false };
++		PromptElement Prompt { "", nullptr, 0 };
+ 		bool FooterAtBottom = false;	// menufooter atBottom
+ 		TileElement Tile { "", "", Vector2f(16, 16) };
+ 		KeyboardElement Keyboard { "", "", "", Vector2f(16, 16), 0.0f, 0xFFFFFFFF, 0xFFFFFFFF, nullptr, false, false };
+diff --git a/es-core/src/components/MenuComponent.cpp b/es-core/src/components/MenuComponent.cpp
+index 8ff89cf0..e634df8d 100644
+--- a/es-core/src/components/MenuComponent.cpp
++++ b/es-core/src/components/MenuComponent.cpp
+@@ -357,6 +357,53 @@ void MenuComponent::setFooter(const std::string& text)
+ 	onSizeChanged();
+ }
+ 
++// The back prompt right of the menu's title (menuPrompt): the theme's button image and BACK as a word
++void MenuComponent::showBackPrompt()
++{
++	auto theme = ThemeData::getMenuTheme();
++	if (mBackIcon != nullptr)
++		return;
++
++	std::string label = Utils::String::toLower(_("BACK"));
++	if (!label.empty())
++	{
++		size_t next = Utils::String::nextCursor(label, 0);
++		label = Utils::String::toUpper(label.substr(0, next)) + label.substr(next);
++	}
++
++	mBackIcon = std::make_shared<ImageComponent>(mWindow, true);
++	mBackIcon->setImage(theme->Prompt.path);
++	mBackIcon->setIsLinear(true);
++
++	mBackLabel = std::make_shared<TextComponent>(mWindow, label, theme->Prompt.font, theme->Prompt.color, ALIGN_LEFT);
++
++	addChild(mBackIcon.get());
++	addChild(mBackLabel.get());
++	mBackIcon->setZIndex(20);
++	mBackLabel->setZIndex(20);
++
++	updateBackPrompt();
++}
++
++void MenuComponent::updateBackPrompt()
++{
++	if (mBackIcon == nullptr || mBackLabel == nullptr)
++		return;
++
++	auto font = mBackLabel->getFont();
++	float iconHeight = Math::round(font->getLetterHeight() * 1.6f);
++	float gap = Math::round(font->getLetterHeight() * 0.5f);
++	float right = mSize.x() - ThemeData::getMenuTheme()->Row.padding;
++	float middle = Math::round(getHeaderGridHeight() / 2.0f);
++
++	mBackLabel->setSize(0, 0);
++	auto labelSize = mBackLabel->getSize();
++	mBackLabel->setPosition(right - labelSize.x(), Math::round(middle - labelSize.y() / 2.0f));
++
++	mBackIcon->setResize(0, iconHeight);
++	mBackIcon->setPosition(right - labelSize.x() - gap - mBackIcon->getSize().x(), Math::round(middle - iconHeight / 2.0f));
++}
++
+ void MenuComponent::updateSize()
+ {
+ 	// GPI
+@@ -421,6 +468,8 @@ void MenuComponent::onSizeChanged()
+ 		mTitleImage->setPosition(getPosition().x() + mSize.x() / 2.0f, getPosition().y() + TITLE_HEIGHT / 2.0f);
+ 		mTitleImage->setMaxSize(mSize.x() * 0.85f, TITLE_HEIGHT);
+ 	}
++
++	updateBackPrompt();
+ }
+ 
+ void MenuComponent::clearButtons()
+@@ -432,6 +481,14 @@ void MenuComponent::clearButtons()
+ 
+ void MenuComponent::addButton(const std::string& name, const std::string& helpText, const std::function<void()>& callback)
+ {
++	// A theme's back prompt in the header (menuPrompt) stands for the BACK button: every menu already goes
++	// back with the pad's back button
++	if (!ThemeData::getMenuTheme()->Prompt.path.empty() && name == _("BACK"))
++	{
++		showBackPrompt();
++		return;
++	}
++
+ 	mButtons.push_back(std::make_shared<ButtonComponent>(mWindow, Utils::String::toUpper(name), helpText, callback));
+ 	updateGrid();
+ 	updateSize();
+diff --git a/es-core/src/components/MenuComponent.h b/es-core/src/components/MenuComponent.h
+index 2903e2ab..608697d0 100644
+--- a/es-core/src/components/MenuComponent.h
++++ b/es-core/src/components/MenuComponent.h
+@@ -84,6 +84,8 @@ public:
+ 
+ private:
+ 	void updateGrid();
++	void showBackPrompt();
++	void updateBackPrompt();
+ 
+ 	NinePatchComponent mBackground;
+ 	ComponentGrid mGrid;
+@@ -97,6 +99,8 @@ private:
+ 	std::vector< std::shared_ptr<ButtonComponent> > mButtons;
+ 
+ 	std::shared_ptr<TextComponent> mFooter;
++	std::shared_ptr<ImageComponent> mBackIcon;
++	std::shared_ptr<TextComponent> mBackLabel;
+ 
+ 	float mMaxHeight;
+ };

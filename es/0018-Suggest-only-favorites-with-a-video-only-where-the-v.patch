@@ -1,0 +1,484 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 19:02:19 +0000
+Subject: [PATCH] Suggest only favorites with a video, only where the view
+ plays one, and keep the panel steady
+
+- Only a system view with a <video> bound to {system:continue:video} gets
+  suggestions; with any other theme {system:continue}, hasContinue and X are
+  as before (the best-rated favorite on a system never played).
+- The pool: the favorites with a video. A system with favorites but none
+  with a video gets no suggestion (its best-rated favorite); only a system
+  with no favorite suggests its best-rated games with a video. Games of
+  tools, emulators and screenshots and media under 1 KB are left out, so a
+  collection never offers a tool to X.
+- The list made again after a game changed keeps the current suggestion
+  while it is still in it.
+- A suggestion's video end moves on in the view's update, together with the
+  panel's rebinding, and X starts the game the panel shows (should the
+  suggestion have changed since it was bound, a menu on top, say). A
+  suggestion stays at least 5 s: a video that ends at once loops until then.
+- A system's slides wait for its theme, and the cards bind their slides
+  again when the view shows and a list changed (a favorite added in a game
+  list), without a tab change.
+---
+ THEMES.md                                   | 12 ++--
+ THEMES_BINDINGS.md                          |  2 +-
+ es-app/src/HomeSlides.cpp                   | 12 ++++
+ es-app/src/HomeSlides.h                     |  8 ++-
+ es-app/src/SystemData.cpp                   | 55 ++++++++++++---
+ es-app/src/SystemData.h                     | 11 ++-
+ es-app/src/views/SystemView.cpp             | 78 +++++++++++++++++----
+ es-app/src/views/SystemView.h               |  8 ++-
+ es-core/src/components/ImageGridComponent.h | 17 +++++
+ 9 files changed, 171 insertions(+), 32 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 1472413d..ad88360a 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -746,10 +746,14 @@ separated by `,`:
+ * X continues the selected system's game, `{system:continue}`: the one played last, else the suggested game
+   (below), else its best-rated favorite; with none, and on tools, emulators and screenshots
+   (`{system:hasContinue}` false), X does nothing. B does not open the navigation bar, which lists every system.
+-* On a system never played, `{system:continue}` is a suggestion: a random favorite with a preview video, each
+-  favorite once before any repeats (without favorites, one of the 12 best-rated games with a video). A system
+-  view `<video>` whose path is `{system:continue:video}` plays it once and the view moves on to the next
+-  suggestion, so the panel's other bindings follow the video; the last game's video loops.
++* Suggestions, only when the system view has a `<video>` whose path is `{system:continue:video}` (any other
++  theme keeps `{system:continue}`, `{system:hasContinue}` and X as above): on a system never played,
++  `{system:continue}` is a random favorite with a preview video, each once before any repeats. A system with
++  favorites but none with a video gets no suggestion (its best-rated favorite, as above); only a system with no
++  favorite at all suggests its 12 best-rated games with a video. Games of tools, emulators and screenshots and
++  videos under 1 KB are left out. The video plays once (each suggestion stays at least 5 seconds) and the view
++  moves on to the next one, binding the panel again, so the other bindings and X follow the video; a list made
++  again (a game changed) keeps the current suggestion while it is still in it. The last game's video loops.
+ * `{system:tab}` is the index of the system's tab in the list (0 for the first), -1 without tabs, so the
+   theme can draw the tab row (`"./tabs/" + {system:tab} + ".png"`).
+ * A tab with more systems than the grid shows at once (`autoLayout` columns × rows) uses
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index 05857b87..353c5a84 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -44,7 +44,7 @@ mostPlayed                  int
+ gameTime                    string
+ lastPlayedDate              string
+ lastPlayed                  game                   The game played last ({system:lastPlayed:name}); empty if none. A collection leaves out tools, emulators and screenshots
+-continue                    game                   lastPlayed, else the suggested game (THEMES.md, Tabs), else the best-rated favorite (else the best-rated game)
++continue                    game                   lastPlayed, else the suggested game (with a {system:continue:video} video in the view; THEMES.md, Tabs), else the best-rated favorite (else the best-rated game)
+ hasLastPlayed               bool                   lastPlayed exists and still resolves to a game
+ hasContinue                 bool                   continue resolves and is not on tools, emulators or screenshots (X does nothing there)
+ slides                      string                 The captures of the system's card, one path per line: favorites with a screenshot, else the 12 best-rated games with one (THEMES.md, Slides)
+diff --git a/es-app/src/HomeSlides.cpp b/es-app/src/HomeSlides.cpp
+index 12a7e5e8..6638dacb 100644
+--- a/es-app/src/HomeSlides.cpp
++++ b/es-app/src/HomeSlides.cpp
+@@ -151,6 +151,12 @@ namespace HomeSlides
+ 	std::vector<std::string> pickPool(std::vector<Candidate> candidates, size_t fallbackCount)
+ 	{
+ 		std::vector<std::string> ids;
++
++		// Favorites without a video: no suggestion rather than games that are not favorites
++		bool favorites = std::any_of(candidates.cbegin(), candidates.cend(), [](const Candidate& c) { return c.favorite; });
++		if (favorites && std::none_of(candidates.cbegin(), candidates.cend(), [](const Candidate& c) { return c.favorite && !c.media.empty(); }))
++			return ids;
++
+ 		for (auto& candidate : pool(candidates, fallbackCount))
+ 			ids.push_back(candidate.id);
+ 
+@@ -159,9 +165,15 @@ namespace HomeSlides
+ 
+ 	void Deck::reset(const std::vector<std::string>& items, std::mt19937& rng)
+ 	{
++		std::string keep = current();
++
+ 		mItems = items;
+ 		mIndex = 0;
+ 		std::shuffle(mItems.begin(), mItems.end(), rng);
++
++		auto it = std::find(mItems.begin(), mItems.end(), keep);
++		if (!keep.empty() && it != mItems.end())
++			std::iter_swap(mItems.begin(), it);
+ 	}
+ 
+ 	const std::string& Deck::current() const
+diff --git a/es-app/src/HomeSlides.h b/es-app/src/HomeSlides.h
+index 69c8da47..61c4377f 100644
+--- a/es-app/src/HomeSlides.h
++++ b/es-app/src/HomeSlides.h
+@@ -42,12 +42,14 @@ namespace HomeSlides
+ 	// fallbackCount); the excluded left out; the representatives first, then by rating and name.
+ 	std::vector<std::string> orderSlides(std::vector<Candidate> candidates, const Rules& rules, size_t fallbackCount);
+ 
+-	// The panel's pool, as ids: the favorites with a video, else the best-rated games with one (at most
+-	// fallbackCount). Exclusions are about captures, so they do not apply.
++	// The panel's pool, as ids: the favorites with a video; none when there are favorites but none has one
++	// (the panel then shows the best-rated favorite); only a system with no favorite at all uses its best-rated
++	// games with a video (at most fallbackCount). Exclusions are about captures, so they do not apply.
+ 	std::vector<std::string> pickPool(std::vector<Candidate> candidates, size_t fallbackCount);
+ 
+ 	// Items in a random order, each shown once before any repeats; a new round never starts with the item
+-	// shown last.
++	// shown last. A reset (the list made again after a game changed) keeps the current item while it is still
++	// in the list, so the panel does not jump to another game.
+ 	class Deck
+ 	{
+ 	public:
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 87762c6c..1b23afc8 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -75,7 +75,9 @@ SystemData::SystemData(const SystemMetadata& meta, SystemEnvironmentData* envDat
+ 	mGameListHash = 0;
+ 	mGameCountInfo = nullptr;
+ 	mSlidesReady = false;
++	mSlidesVersion = 0;
+ 	mSuggestionsReady = false;
++	mPanelVideo = false;
+ 	mSortId = Settings::getInstance()->getInt(getName() + ".sort");
+ 	mUnlimitedRecursiveDepth = Settings::getInstance()->getBool(getName() + ".unlimited_recursive_depth");
+ 	int depth;
+@@ -2155,7 +2157,7 @@ FileData* SystemData::getLastPlayedGame(bool orChefPick)
+ 		return nullptr;
+ 
+ 	FileData* game = info->lastPlayedPath.empty() ? nullptr : mRootFolder->FindByPath(info->lastPlayedPath);
+-	if (game == nullptr && orChefPick)
++	if (game == nullptr && orChefPick && mPanelVideo)
+ 		game = getSuggestedGame();
+ 	if (game == nullptr && orChefPick && !info->chefPickPath.empty())
+ 		game = mRootFolder->FindByPath(info->chefPickPath);
+@@ -2171,7 +2173,9 @@ static std::mt19937& homeRandom()
+ }
+ 
+ // The games of the system and of the systems grouped in it, each keyed by its own system and its path
+-// in that system's folder (as the gamelist and the theme variable "systemslides" write it)
++// in that system's folder (as the gamelist and the theme variable "systemslides" write it). Games of tools,
++// emulators and screenshots are left out (a collection never offers one to X, as getGameCountInfo), and so
++// is media under 1 KB (an empty or broken file).
+ std::vector<HomeSlides::Candidate> SystemData::getHomeCandidates(bool video)
+ {
+ 	std::vector<HomeSlides::Candidate> candidates;
+@@ -2182,7 +2186,7 @@ std::vector<HomeSlides::Candidate> SystemData::getHomeCandidates(bool video)
+ 	{
+ 		FileData* source = game->getSourceFileData();
+ 		SystemData* system = source->getSystem();
+-		if (system == nullptr || system->getRootFolder() == nullptr)
++		if (system == nullptr || system->getRootFolder() == nullptr || isUtilitySystem(system))
+ 			continue;
+ 
+ 		HomeSlides::Candidate candidate;
+@@ -2193,7 +2197,7 @@ std::vector<HomeSlides::Candidate> SystemData::getHomeCandidates(bool video)
+ 		candidate.rating = Utils::String::toFloat(game->getMetadata(MetaDataId::Rating));
+ 		candidate.favorite = game->getFavorite();
+ 
+-		if (!candidate.media.empty() && !Utils::FileSystem::exists(candidate.media))
++		if (!candidate.media.empty() && Utils::FileSystem::getFileSize(candidate.media) < 1024)
+ 			candidate.media.clear();
+ 
+ 		candidates.push_back(candidate);
+@@ -2207,20 +2211,46 @@ const std::vector<std::string>& SystemData::getSlides()
+ 	if (mSlidesReady)
+ 		return mSlides;
+ 
++	// Without its theme yet, the list waits: it is made once the theme (and its "systemslides") is there
++	if (mTheme == nullptr)
++	{
++		mSlides.clear();
++		return mSlides;
++	}
++
+ 	mSlidesReady = true;
+-	mSlides.clear();
+ 
+-	if (isCollection() || isUtilitySystem(this) || mTheme == nullptr)
+-		return mSlides;
++	std::vector<std::string> slides;
++	if (!isCollection() && !isUtilitySystem(this))
++		slides = HomeSlides::orderSlides(getHomeCandidates(false), HomeSlides::parseRules(mTheme->getVariable("systemslides")), 12);
++
++	if (slides != mSlides)
++	{
++		mSlides = slides;
++		mSlidesVersion++;
++	}
+ 
+-	auto rules = HomeSlides::parseRules(mTheme->getVariable("systemslides"));
+-	mSlides = HomeSlides::orderSlides(getHomeCandidates(false), rules, 12);
+ 	return mSlides;
+ }
+ 
++int SystemData::getSlidesVersion()
++{
++	getSlides();
++	return mSlidesVersion;
++}
++
++void SystemData::setPanelVideo(bool value)
++{
++	if (mPanelVideo == value)
++		return;
++
++	mPanelVideo = value;
++	mSuggestionsReady = false;
++}
++
+ FileData* SystemData::getSuggestedGame()
+ {
+-	if (mRootFolder == nullptr || isUtilitySystem(this))
++	if (mRootFolder == nullptr || !mPanelVideo || isUtilitySystem(this))
+ 		return nullptr;
+ 
+ 	if (!mSuggestionsReady)
+@@ -2235,6 +2265,11 @@ FileData* SystemData::getSuggestedGame()
+ 	return mRootFolder->FindByPath(mSuggestions.current());
+ }
+ 
++bool SystemData::hasOtherSuggestion()
++{
++	return getSuggestedGame() != nullptr && mSuggestions.size() > 1;
++}
++
+ bool SystemData::nextSuggestion()
+ {
+ 	if (getSuggestedGame() == nullptr)
+diff --git a/es-app/src/SystemData.h b/es-app/src/SystemData.h
+index b32a49ad..aa419d12 100644
+--- a/es-app/src/SystemData.h
++++ b/es-app/src/SystemData.h
+@@ -126,9 +126,16 @@ public:
+ 	// with one, else its best-rated games, as the theme variable "systemslides" orders and filters them
+ 	// (HomeSlides::Rules); none on collections and utilities.
+ 	const std::vector<std::string>& getSlides();
++	// Changes each time the system's slides change (to bind the cards again)
++	int getSlidesVersion();
+ 	// On a system never played, the game the panel suggests: a random favorite with a preview video, each
+-	// one once before any repeats, else a best-rated game with one; nullptr without any
++	// one once before any repeats; on a system with no favorite, a best-rated game with one; nullptr without
++	// any, and unless the system view plays {system:continue:video} (setPanelVideo): any other theme keeps
++	// {system:continue} on the best-rated favorite
+ 	FileData* getSuggestedGame();
++	void setPanelVideo(bool value);
++	// More than one suggestion to move on to
++	bool hasOtherSuggestion();
+ 	// The next suggestion (when its video ends); false when there is no other one
+ 	bool nextSuggestion();
+ 
+@@ -302,8 +309,10 @@ private:
+ 
+ 	std::vector<std::string> mSlides;
+ 	bool mSlidesReady;
++	int mSlidesVersion;
+ 	HomeSlides::Deck mSuggestions;
+ 	bool mSuggestionsReady;
++	bool mPanelVideo;
+ 
+ 	bool mHidden;
+ };
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index 293c5a1a..abaf83dc 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -30,6 +30,7 @@
+ #include "components/CarouselComponent.h"
+ 
+ #include <set>
++#include <SDL_timer.h>
+ 
+ std::map<std::string, int> SystemView::sSystemTabs;
+ 
+@@ -58,7 +59,9 @@ SystemView::SystemView(Window* window) : GuiComponent(window),
+ 	mPressedPoint = Vector2i(-1, -1);
+ 
+ 	mActiveTab = 0;
+-	mSuggestionChanged = false;
++	mSuggestionEnded = nullptr;
++	mShownSystem = nullptr;
++	mContinueShownAt = 0;
+ 
+ 	setSize((float)Renderer::getScreenWidth(), (float)Renderer::getScreenHeight());
+ 	populate();
+@@ -207,18 +210,25 @@ void SystemView::loadExtras(SystemData* system)
+ 		}
+ 	}
+ 
+-	// The panel's videos of {system:continue}, in a container or not: see onContinueVideoEnded
++	// The panel's videos of {system:continue:video}, in a container or not: see onContinueVideoEnded. Only a
++	// view that plays one gets suggestions (SystemData::setPanelVideo); any other keeps {system:continue}
++	bool panelVideo = false;
+ 	for (auto extra : extras)
+ 	{
+-		forEachVideo(extra, [this, system](VideoComponent* video)
++		forEachVideo(extra, [this, system, &panelVideo](VideoComponent* video)
+ 		{
+ 			auto expressions = video->getBindingExpressions();
+ 			auto path = expressions.find("path");
+-			if (path != expressions.cend() && path->second.find("{system:continue") != std::string::npos)
++			if (path != expressions.cend() && path->second.find("{system:continue:video}") != std::string::npos)
++			{
+ 				video->setOnVideoEnded([this, system]() { return onContinueVideoEnded(system); });
++				panelVideo = true;
++			}
+ 		});
+ 	}
+ 
++	system->setPanelVideo(panelVideo);
++
+ 	// sort the extras by z-index
+ 	std::stable_sort(extras.begin(), extras.end(), [](GuiComponent* a, GuiComponent* b) { return b->getZIndex() > a->getZIndex(); });
+ 
+@@ -558,6 +568,15 @@ bool SystemView::input(InputConfig* config, Input input)
+ 		{
+ 			SystemData* system = getSelected();
+ 			FileData* game = system != nullptr ? system->getContinueGame() : nullptr;
++
++			// The game the panel shows, should the suggestion have changed since it was bound
++			if (game != nullptr && system == mShownSystem && !mShownContinue.empty() && game->getPath() != mShownContinue)
++			{
++				FileData* shown = system->getRootFolder()->FindByPath(mShownContinue);
++				if (shown != nullptr)
++					game = shown;
++			}
++
+ 			if (game != nullptr)
+ 			{
+ 				mCarousel.stopScrolling();
+@@ -712,11 +731,15 @@ void SystemView::showNavigationBar(const std::string& title, const std::function
+ 
+ void SystemView::update(int deltaTime)
+ {
+-	// A suggestion's video ended: the panel shows the next suggestion, before the video restarts
+-	if (mSuggestionChanged)
++	// A suggestion's video ended: the next suggestion and the panel's rebinding in one step, before the video
++	// restarts, so X never launches a game the panel does not show
++	if (mSuggestionEnded != nullptr)
+ 	{
+-		mSuggestionChanged = false;
+-		updateExtraTextBinding();
++		SystemData* system = mSuggestionEnded;
++		mSuggestionEnded = nullptr;
++
++		if (system == getSelected() && system->nextSuggestion())
++			updateExtraTextBinding();
+ 	}
+ 
+ 	mCarousel.update(deltaTime);
+@@ -742,16 +765,19 @@ void SystemView::update(int deltaTime)
+ }
+ 
+ // The panel's video of {system:continue}: the last game's loops; on a system never played, a suggestion's
+-// ends and the panel moves on to the next suggestion (SystemData::nextSuggestion)
++// ends and the panel moves on to the next suggestion (in update). A suggestion stays at least
++// MIN_SUGGESTION_MS: a video that ends at once loops until then rather than start VLC again every few frames.
++static const unsigned int MIN_SUGGESTION_MS = 5000;
++
+ bool SystemView::onContinueVideoEnded(SystemData* system)
+ {
+-	if (system == nullptr || system != getSelected() || system->getLastPlayedGame() != nullptr)
++	if (system == nullptr || system != getSelected() || system->getLastPlayedGame() != nullptr || !system->hasOtherSuggestion())
+ 		return true;
+ 
+-	if (!system->nextSuggestion())
++	if (SDL_GetTicks() - mContinueShownAt < MIN_SUGGESTION_MS)
+ 		return true;
+ 
+-	mSuggestionChanged = true;
++	mSuggestionEnded = system;
+ 	return false;
+ }
+ 
+@@ -767,6 +793,16 @@ void SystemView::updateExtraTextBinding()
+ 
+ 	for (auto extra : mEntries[mCursor].backgroundExtras)
+ 		BindingManager::updateBindings(extra, system);
++
++	// The game the panel now shows, for X, and since when
++	FileData* shown = system->getContinueGame();
++	std::string path = shown != nullptr ? shown->getPath() : "";
++	if (system != mShownSystem || path != mShownContinue)
++	{
++		mShownSystem = system;
++		mShownContinue = path;
++		mContinueShownAt = SDL_GetTicks();
++	}
+ }
+ 
+ void SystemView::onCursorChanged(const CursorState& state)
+@@ -1748,6 +1784,24 @@ void SystemView::onShow()
+ 	// What changed while hidden (a game played since, a favorite) shows at once
+ 	updateExtraTextBinding();
+ 
++	// The cards too, when a system's slides changed (a favorite added in a game list)
++	bool slidesChanged = false;
++	for (auto& entry : mEntries)
++	{
++		int version = entry.object->getSlidesVersion();
++		auto it = mSlidesBound.find(entry.object);
++		if (it == mSlidesBound.cend())
++			mSlidesBound[entry.object] = version;
++		else if (it->second != version)
++		{
++			it->second = version;
++			slidesChanged = true;
++		}
++	}
++
++	if (slidesChanged && mCarousel.isGrid())
++		mCarousel.asGrid()->updateTileBindings();
++
+ 	activateExtras(mCarousel.getCursorIndex());
+ 
+ 	for (auto sb : mStaticBackgrounds)
+diff --git a/es-app/src/views/SystemView.h b/es-app/src/views/SystemView.h
+index 045c7fd0..4d776d4c 100644
+--- a/es-app/src/views/SystemView.h
++++ b/es-app/src/views/SystemView.h
+@@ -164,7 +164,13 @@ private:
+ 	std::vector<SystemViewTab>			mTabs;
+ 	int									mActiveTab;
+ 	std::map<int, std::string>			mTabCursors;
+-	bool								mSuggestionChanged;
++	// The panel's suggestion: the system whose video ended (update moves on), the game shown and since when,
++	// and the slides version each card was bound with
++	SystemData*							mSuggestionEnded;
++	SystemData*							mShownSystem;
++	std::string							mShownContinue;
++	unsigned int						mContinueShownAt;
++	std::map<SystemData*, int>			mSlidesBound;
+ 
+ 	static std::map<std::string, int>	sSystemTabs;
+ };
+diff --git a/es-core/src/components/ImageGridComponent.h b/es-core/src/components/ImageGridComponent.h
+index af67d176..043ad4da 100644
+--- a/es-core/src/components/ImageGridComponent.h
++++ b/es-core/src/components/ImageGridComponent.h
+@@ -104,6 +104,9 @@ public:
+ 
+ 	virtual void topWindow(bool isTop);
+ 	virtual void onShow();
++
++	// Binds the items' templates again (what they show changed)
++	void updateTileBindings();
+ 	virtual void onHide();
+ 	virtual void onScreenSaverActivate();
+ 	virtual void onScreenSaverDeactivate();
+@@ -628,6 +631,20 @@ void ImageGridComponent<T>::setOpacity(unsigned char opacity)
+ 			entry.data.tile->setOpacity(opacity);
+ }
+ 
++template<typename T>
++void ImageGridComponent<T>::updateTileBindings()
++{
++	for (auto& entry : mEntries)
++	{
++		if (entry.data.tile == nullptr)
++			continue;
++
++		IBindable* bindable = getBindable(entry);
++		if (bindable != nullptr)
++			entry.data.tile->updateBindings(bindable);
++	}
++}
++
+ template<typename T>
+ void ImageGridComponent<T>::onShow()
+ {

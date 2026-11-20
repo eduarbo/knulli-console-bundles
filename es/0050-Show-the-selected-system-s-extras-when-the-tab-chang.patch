@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 02:12:01 +0000
+Subject: [PATCH] Show the selected system's extras when the tab changes
+
+- A tab shown before gives back its extras hidden. When the cursor's index
+  on the new tab matched the old one, the cursor change did not activate
+  them: the selected system's panel stayed hidden (its video did not
+  play) until the cursor moved. Going to a system now shows its extras.
+---
+ es-app/src/views/SystemView.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index 57092bd0..2f5657e7 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -450,6 +450,10 @@ void SystemView::goToSystem(SystemData* system, bool animate)
+ 	if (mLastCursor == -1)
+ 		onCursorChanged(CURSOR_STOPPED);
+ 
++	// The selected system's extras show: those of a tab shown before come back hidden, and a cursor already in
++	// place (the same index on both tabs) does not activate them
++	activateExtras(mCarousel.getCursorIndex());
++
+ 	if (!animate)
+ 	{
+ 		finishAnimation(0);

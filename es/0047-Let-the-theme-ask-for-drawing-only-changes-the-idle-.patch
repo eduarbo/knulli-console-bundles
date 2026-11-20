@@ -1,0 +1,206 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:27:47 +0000
+Subject: [PATCH] Let the theme ask for drawing only changes, the idle pause
+ and shown-only bindings
+
+- Drawing a frame only when it changes, the idle pause after 60 s and
+  leaving a hidden container's elements unbound were on for every theme.
+  A theme now asks for them with its variables esRenderOnChange,
+  esIdlePause (seconds) and esBindShownOnly; without them ES behaves as
+  before. The settings RenderOnChange and BindShownOnly ("auto", "true",
+  "false") and IdlePause (-1 for the theme's, or seconds) override the
+  theme.
+- A hidden container left unbound still binds its videos: a video kept
+  playing what it was bound to before.
+---
+ es-core/src/BindingManager.cpp | 23 ++++++++++++++++++--
+ es-core/src/BindingManager.h   |  7 ++++++
+ es-core/src/Settings.cpp       |  7 ++++--
+ es-core/src/Window.cpp         | 39 +++++++++++++++++++++++++++++++---
+ es-core/src/Window.h           |  7 ++++++
+ 5 files changed, 76 insertions(+), 7 deletions(-)
+
+diff --git a/es-core/src/BindingManager.cpp b/es-core/src/BindingManager.cpp
+index 3e5f9043..4c48b68d 100644
+--- a/es-core/src/BindingManager.cpp
++++ b/es-core/src/BindingManager.cpp
+@@ -19,6 +19,21 @@ BindableProperty BindableProperty::EmptyString("", BindablePropertyType::String)
+ 
+ static std::map<std::string, std::function<BindableProperty()>> sGlobalProperties;
+ 
++bool BindingManager::mBindShownOnly = false;
++
++// The videos under a container left unbound: a video keeps playing what it was bound to, shown or not
++void BindingManager::bindVideos(GuiComponent* comp, IBindable* bindable)
++{
++	for (int i = 0; i < comp->getChildCount(); i++)
++	{
++		auto child = comp->getChild(i);
++		if (child->isKindOf<VideoComponent>())
++			updateBindings(child, bindable, true);
++		else
++			bindVideos(child, bindable);
++	}
++}
++
+ class GlobalBinding : public IBindable
+ {
+ 	BindableProperty getProperty(const std::string& name) override
+@@ -341,9 +356,13 @@ void BindingManager::updateBindings(GuiComponent* comp, IBindable* bindable, boo
+ 	if (recursive)
+ 	{
+ 		// A hidden container's elements are bound when it shows (its own visibility is bound first, above): a
+-		// view can hold the layouts and parts of other cases without binding all of them each time
+-		if (!comp->isVisible() && typeid(*comp) == typeid(GuiComponent))
++		// view can hold the layouts and parts of other cases without binding all of them each time. Its videos
++		// are bound now.
++		if (mBindShownOnly && !comp->isVisible() && typeid(*comp) == typeid(GuiComponent))
++		{
++			bindVideos(comp, bindable);
+ 			return;
++		}
+ 
+ 		for (int i = 0; i < comp->getChildCount(); i++)
+ 			updateBindings(comp->getChild(i), bindable, recursive);
+diff --git a/es-core/src/BindingManager.h b/es-core/src/BindingManager.h
+index b4808ab0..b85e97c1 100644
+--- a/es-core/src/BindingManager.h
++++ b/es-core/src/BindingManager.h
+@@ -111,7 +111,14 @@ public:
+ 	// Adds a {global:name} property, read when bindings update (the app registers what es-core cannot see)
+ 	static void          registerGlobalProperty(const std::string& name, const std::function<BindableProperty()>& getter);
+ 
++	// A hidden container's elements are left unbound until it shows (the theme asks: Window::onThemeChanged);
++	// its videos are bound all the same
++	static void          setBindShownOnly(bool value) { mBindShownOnly = value; }
++	static bool          bindsShownOnly() { return mBindShownOnly; }
++
+ private:
++	static bool          mBindShownOnly;
++	static void          bindVideos(GuiComponent* comp, IBindable* bindable);
+ 	static void          bindValues(IBindable* current, std::string& xp, bool showDefaultText, std::string& evaluableExpression);
+ 	static std::string   updateBoundExpression(std::string& xp, IBindable* bindable, bool showDefaultText);
+ };
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 06c575f4..033aadd0 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -122,11 +122,14 @@ void Settings::setDefaults()
+ 	mBoolMap["IgnoreLeadingArticles"] = Settings::_IgnoreLeadingArticles;
+ 	mBoolMap["ShowFoldersFirst"] = Settings::_ShowFoldersFirst;
+ 	mBoolMap["DrawFramerate"] = false;
+-	mBoolMap["RenderOnChange"] = true;
++	// "auto": as the theme asks (Window::onThemeChanged), "true" or "false" for every theme
++	mStringMap["RenderOnChange"] = "auto";
+ 	mBoolMap["RenderOnChangeVerify"] = false;
+-	mIntMap["IdlePause"] = 60;
++	// Seconds; -1: as the theme asks
++	mIntMap["IdlePause"] = -1;
+ 	mBoolMap["IdlePauseVideo"] = true;
+ 	mBoolMap["IdlePauseSlides"] = true;
++	mStringMap["BindShownOnly"] = "auto";
+ 	mBoolMap["ScrollLoadMedias"] = false;	
+ 	mBoolMap["ShowExit"] = true;
+ 	mBoolMap["ExitOnRebootRequired"] = false;
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index af70fcd5..804c7bc2 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -30,13 +30,14 @@
+ #include "Splash.h"
+ #include "PowerSaver.h"
+ #include "renderers/Renderer.h"
++#include "BindingManager.h"
+ 
+ #if WIN32
+ #include <SDL_syswm.h>
+ #endif
+ 
+ Window::Window() : mNormalizeNextUpdate(false), mFrameTimeElapsed(0), mFrameCountElapsed(0), mFrameDrawnStart(0), mAverageDeltaTime(10),
+-  mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mIdleVideo(false), mIdleSlides(false), mSuspendedMs(-1), mScreenSaver(NULL), mRenderScreenSaver(false), mClockElapsed(0), mMouseCapture(nullptr), mMenuBackgroundShaderTextureCache(-1)
++  mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mIdleVideo(false), mIdleSlides(false), mRenderOnChange(false), mIdlePauseSeconds(0), mSuspendedMs(-1), mScreenSaver(NULL), mRenderScreenSaver(false), mClockElapsed(0), mMouseCapture(nullptr), mMenuBackgroundShaderTextureCache(-1)
+ {			
+ 	mTransitionOffset = 0;
+ 
+@@ -1078,12 +1079,42 @@ void Window::checkSystemResume()
+ 
+ bool Window::drawsOnlyChanges()
+ {
+-	return mGuiStack.size() == 1 && !mRenderScreenSaver && !mSleeping && Settings::getInstance()->getBool("RenderOnChange");
++	return mGuiStack.size() == 1 && !mRenderScreenSaver && !mSleeping && mRenderOnChange;
++}
++
++// A setting left at "auto" follows the theme's variable; "true" or "false" holds for every theme
++static bool themeOption(const std::shared_ptr<ThemeData>& theme, const std::string& setting, const std::string& variable)
++{
++	std::string value = Settings::getInstance()->getString(setting);
++	if (value == "true" || value == "1")
++		return true;
++
++	if (value != "auto" && !value.empty())
++		return false;
++
++	if (theme == nullptr)
++		return false;
++
++	value = theme->getVariable(variable);
++	return value == "true" || value == "1";
++}
++
++void Window::applyThemeOptions(const std::shared_ptr<ThemeData>& theme)
++{
++	mRenderOnChange = themeOption(theme, "RenderOnChange", "esRenderOnChange");
++	BindingManager::setBindShownOnly(themeOption(theme, "BindShownOnly", "esBindShownOnly"));
++
++	mIdlePauseSeconds = Settings::getInstance()->getInt("IdlePause");
++	if (mIdlePauseSeconds < 0)
++		mIdlePauseSeconds = theme == nullptr ? 0 : Math::max(0, atoi(theme->getVariable("esIdlePause").c_str()));
++
++	LOG(LogInfo) << "Window: draws only changes " << (mRenderOnChange ? "yes" : "no") << ", idle pause " << mIdlePauseSeconds << " s, binds only shown containers " << (BindingManager::bindsShownOnly() ? "yes" : "no");
++	updateIdlePause();
+ }
+ 
+ void Window::updateIdlePause()
+ {
+-	int seconds = Settings::getInstance()->getInt("IdlePause");
++	int seconds = mIdlePauseSeconds;
+ 	bool idle = seconds > 0 && mTimeSinceLastInput >= (unsigned int)seconds * 1000;
+ 
+ 	mIdleVideo = idle && Settings::getInstance()->getBool("IdlePauseVideo");
+@@ -1431,6 +1462,8 @@ void Window::processPostedFunctions()
+ 
+ void Window::onThemeChanged(const std::shared_ptr<ThemeData>& theme)
+ {
++	applyThemeOptions(theme);
++
+ 	for (auto extra : mScreenExtras)
+ 		delete extra;
+ 
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index 0ea02a94..2750efdc 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -75,6 +75,10 @@ public:
+ 
+ 	// Idle pause: after "IdlePause" seconds without input (0: never), the views' videos stop at the end of
+ 	// their loop ("IdlePauseVideo") and their slideshows stop moving ("IdlePauseSlides"); input resumes them
++	//
++	// A theme asks for these with its variables (Settings left at "auto", or -1 for IdlePause):
++	// esRenderOnChange (true), esIdlePause (seconds) and esBindShownOnly (true, BindingManager); without
++	// them ES draws every frame, has no idle pause and binds every element.
+ 	enum IdlePart { IDLE_VIDEO, IDLE_SLIDES };
+ 	bool isIdlePaused(IdlePart part) const { return part == IDLE_VIDEO ? mIdleVideo : mIdleSlides; }
+ 	bool getAllowSleep();
+@@ -196,8 +200,11 @@ private:
+ 	unsigned int mTimeSinceLastInput;
+ 	bool mIdleVideo;
+ 	bool mIdleSlides;
++	bool mRenderOnChange;	// the setting, or the theme's choice
++	int  mIdlePauseSeconds;
+ 	long long mSuspendedMs;	// CLOCK_BOOTTIME less CLOCK_MONOTONIC at the last check; -1 before the first
+ 	void updateIdlePause();
++	void applyThemeOptions(const std::shared_ptr<ThemeData>& theme);
+ 
+ 	bool mRenderedHelpPrompts;
+ 

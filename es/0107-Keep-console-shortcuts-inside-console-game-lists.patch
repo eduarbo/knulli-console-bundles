@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 04:24:38 +0000
+Subject: [PATCH] Keep console shortcuts inside console game lists
+
+---
+ es-app/src/views/SystemView.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index f0f20fb5..f9c882e8 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -1745,7 +1745,7 @@ SystemData* SystemView::adjacentConsole(SystemData* system, int direction)
+ {
+ 	if (consoleOrder.empty()) return nullptr;
+ 	auto it = std::find(consoleOrder.begin(), consoleOrder.end(), system);
+-	if (it == consoleOrder.end()) return direction < 0 ? consoleOrder.back() : consoleOrder.front();
++	if (it == consoleOrder.end()) return nullptr;
+ 	const int count = static_cast<int>(consoleOrder.size());
+ 	return consoleOrder[(static_cast<int>(it - consoleOrder.begin()) + direction + count) % count];
+ }

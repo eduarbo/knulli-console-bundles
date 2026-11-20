@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:01:17 +0000
+Subject: [PATCH] Bind a utility's items, newest first, for the home's panel
+
+- {system:recent1} to {system:recent8} on tools, emulators and screenshots:
+  tools and emulators by last run, screenshots by file date, then the never
+  run by name. The list is made again when the files change.
+---
+ THEMES_BINDINGS.md        |  1 +
+ es-app/src/HomeSlides.cpp | 27 ++++++++++++++++++++
+ es-app/src/HomeSlides.h   | 11 ++++++++
+ es-app/src/SystemData.cpp | 54 ++++++++++++++++++++++++++++++++++++++-
+ es-app/src/SystemData.h   |  5 ++++
+ 5 files changed, 97 insertions(+), 1 deletion(-)
+
+diff --git a/THEMES_BINDINGS.md b/THEMES_BINDINGS.md
+index aedd034c..63e91558 100644
+--- a/THEMES_BINDINGS.md
++++ b/THEMES_BINDINGS.md
+@@ -48,6 +48,7 @@ continue                    game                   lastPlayed, else the suggeste
+ hasLastPlayed               bool                   lastPlayed exists and still resolves to a game
+ hasContinue                 bool                   continue resolves and is not on tools, emulators or screenshots (X does nothing there)
+ slides                      string                 The captures of the system's card, one path per line: favorites with a screenshot, else the 12 best-rated games with one (THEMES.md, Slides)
++recent1 ... recent8         game                   On tools, emulators and screenshots only: their items, tools and emulators by last run, screenshots newest first (by file date), then the never run by name ({system:recent1:name}, {system:recent1:image})
+ image                       path
+ showManual                  bool
+ showSaveStates              bool
+diff --git a/es-app/src/HomeSlides.cpp b/es-app/src/HomeSlides.cpp
+index b198d107..b126b9e0 100644
+--- a/es-app/src/HomeSlides.cpp
++++ b/es-app/src/HomeSlides.cpp
+@@ -169,6 +169,33 @@ namespace HomeSlides
+ 		return ids;
+ 	}
+ 
++	static std::string lower(const std::string& text)
++	{
++		std::string out = text;
++		for (auto& c : out)
++			if (c >= 'A' && c <= 'Z')
++				c = c - 'A' + 'a';
++
++		return out;
++	}
++
++	std::vector<std::string> newestFirst(std::vector<Dated> items, size_t count)
++	{
++		std::stable_sort(items.begin(), items.end(), [](const Dated& a, const Dated& b)
++		{
++			if (a.date != b.date)
++				return a.date > b.date;
++
++			return lower(a.name) < lower(b.name);
++		});
++
++		std::vector<std::string> ids;
++		for (size_t i = 0; i < items.size() && i < count; i++)
++			ids.push_back(items[i].id);
++
++		return ids;
++	}
++
+ 	void Deck::reset(const std::vector<std::string>& items, std::mt19937& rng)
+ 	{
+ 		std::string keep = current();
+diff --git a/es-app/src/HomeSlides.h b/es-app/src/HomeSlides.h
+index a1c0613d..968fb469 100644
+--- a/es-app/src/HomeSlides.h
++++ b/es-app/src/HomeSlides.h
+@@ -50,6 +50,17 @@ namespace HomeSlides
+ 	// does not apply.
+ 	std::vector<std::string> pickPool(std::vector<Candidate> candidates, const Rules& rules, size_t fallbackCount);
+ 
++	// A utility's items for the home's panel (tools and emulators by last run, screenshots by file date):
++	// the newest first, then the never dated by name; at most count ids
++	struct Dated
++	{
++		std::string id;
++		std::string name;
++		std::string date;	// sortable (as a gamelist's "lastplayed"); empty when never
++	};
++
++	std::vector<std::string> newestFirst(std::vector<Dated> items, size_t count);
++
+ 	// Items in a random order, each shown once before any repeats; a new round never starts with the item
+ 	// shown last. A reset (the list made again after a game changed) keeps the current item while it is still
+ 	// in the list, so the panel does not jump to another game.
+diff --git a/es-app/src/SystemData.cpp b/es-app/src/SystemData.cpp
+index 7f7ba356..5e6b6142 100644
+--- a/es-app/src/SystemData.cpp
++++ b/es-app/src/SystemData.cpp
+@@ -78,6 +78,7 @@ SystemData::SystemData(const SystemMetadata& meta, SystemEnvironmentData* envDat
+ 	mSlidesVersion = 0;
+ 	mSuggestionsReady = false;
+ 	mPanelVideo = false;
++	mRecentCount = (size_t)-1;
+ 	mSortId = Settings::getInstance()->getInt(getName() + ".sort");
+ 	mUnlimitedRecursiveDepth = Settings::getInstance()->getBool(getName() + ".unlimited_recursive_depth");
+ 	int depth;
+@@ -1504,9 +1505,10 @@ void SystemData::updateDisplayedGameCount()
+ 
+ 	mGameCountInfo = nullptr;
+ 
+-	// A favorite or a capture changed: the home's slides and suggestions are made again
++	// A favorite or a capture changed: the home's slides, suggestions and recent items are made again
+ 	mSlidesReady = false;
+ 	mSuggestionsReady = false;
++	mRecentCount = (size_t)-1;
+ }
+ 
+ void SystemData::loadTheme()
+@@ -2266,6 +2268,50 @@ FileData* SystemData::getSuggestedGame()
+ 	return mRootFolder->FindByPath(mSuggestions.current());
+ }
+ 
++FileData* SystemData::getRecentItem(size_t index)
++{
++	if (mRootFolder == nullptr || !isUtilitySystem(this))
++		return nullptr;
++
++	// Made again when the files change (a new screenshot, a tool run: updateDisplayedGameCount)
++	auto files = mRootFolder->getFilesRecursive(GAME, true);
++	if (files.size() != mRecentCount)
++	{
++		bool screenshots = hasPlatformId(PlatformIds::IMAGEVIEWER) || getName() == "imageviewer";
++
++		std::vector<HomeSlides::Dated> items;
++		for (auto file : files)
++		{
++			HomeSlides::Dated item;
++			item.id = file->getPath();
++			item.name = file->getName();
++
++			if (screenshots)
++			{
++				auto date = Utils::FileSystem::getFileModificationDate(file->getPath());
++				if (date.getTime() > 0)
++					item.date = date.getIsoString();
++			}
++			else
++			{
++				item.date = file->getMetadata(MetaDataId::LastPlayed);
++				if (item.date.size() < 15)	// "0" or unset: never run
++					item.date.clear();
++			}
++
++			items.push_back(item);
++		}
++
++		mRecent = HomeSlides::newestFirst(items, 8);
++		mRecentCount = files.size();
++	}
++
++	if (index >= mRecent.size())
++		return nullptr;
++
++	return mRootFolder->FindByPath(mRecent[index]);
++}
++
+ bool SystemData::hasOtherSuggestion()
+ {
+ 	return getSuggestedGame() != nullptr && mSuggestions.size() > 1;
+@@ -2422,6 +2468,12 @@ BindableProperty SystemData::getProperty(const std::string& name)
+ 	if (name == "slides")
+ 		return Utils::String::join(getSlides(), "\n");
+ 
++	if (name.size() == 7 && Utils::String::startsWith(name, "recent") && name[6] >= '1' && name[6] <= '8')
++	{
++		FileData* item = getRecentItem(name[6] - '1');
++		return item != nullptr ? BindableProperty((IBindable*)item) : BindableProperty::Null;
++	}
++
+ 	if (name == "lastPlayed" || name == "continue")
+ 	{
+ 		FileData* game = getLastPlayedGame(name == "continue");
+diff --git a/es-app/src/SystemData.h b/es-app/src/SystemData.h
+index aa419d12..30b24f04 100644
+--- a/es-app/src/SystemData.h
++++ b/es-app/src/SystemData.h
+@@ -134,6 +134,9 @@ public:
+ 	// {system:continue} on the best-rated favorite
+ 	FileData* getSuggestedGame();
+ 	void setPanelVideo(bool value);
++	// A utility's items for the home's panel ({system:recent1} to {system:recent8}): tools and emulators by
++	// last run, screenshots newest first, the never run by name; none on other systems
++	FileData* getRecentItem(size_t index);
+ 	// More than one suggestion to move on to
+ 	bool hasOtherSuggestion();
+ 	// The next suggestion (when its video ends); false when there is no other one
+@@ -312,6 +315,8 @@ private:
+ 	int mSlidesVersion;
+ 	HomeSlides::Deck mSuggestions;
+ 	bool mSuggestionsReady;
++	std::vector<std::string> mRecent;
++	size_t mRecentCount;	// the files it was made from
+ 	bool mPanelVideo;
+ 
+ 	bool mHidden;

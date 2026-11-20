@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 03:19:15 +0000
+Subject: [PATCH] Keep the frame cache's tracked state across a replay
+
+- Replaying a square rectangle binds texture 0 through Renderer's own
+  functions, which wrote the state the recording tracks; replayed binds
+  did not. The next frame then started from another state than the one
+  kept with the frame on screen and was drawn again though nothing
+  changed (about two idle frames in three on a view with one). The
+  tracked state is saved and put back around each replay.
+---
+ es-core/src/renderers/Renderer.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/es-core/src/renderers/Renderer.cpp b/es-core/src/renderers/Renderer.cpp
+index f71b1d2d..c16c41b6 100644
+--- a/es-core/src/renderers/Renderer.cpp
++++ b/es-core/src/renderers/Renderer.cpp
+@@ -1027,6 +1027,11 @@ namespace Renderer
+ 			bool wasRecording = recording;
+ 			recording = false;
+ 
++			// The state the recording tracks stays the recording's: a replayed square rectangle binds texture 0
++			// through Renderer's own functions, and the next frame would start from another state than the one
++			// kept with the frame on screen (it would never compare equal)
++			State tracked = state;
++
+ 			for (; sent < frame.commands.size(); sent++)
+ 			{
+ 				const Command& c = frame.commands[sent];
+@@ -1049,6 +1054,7 @@ namespace Renderer
+ 				}
+ 			}
+ 
++			state = tracked;
+ 			recording = wasRecording;
+ 		}
+ 

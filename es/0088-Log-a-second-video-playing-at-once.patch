@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 14:39:29 +0000
+Subject: [PATCH] Log a second video playing at once
+
+A screen plays one video at most (a selected card's, or a home panel's
+last played game). The videos showing their frames are now counted, and
+one more than that is logged as "VideoCheck: N videos play at once" with
+their paths, so a theme that plays the same video in two places shows in
+the log.
+---
+ es-core/src/components/VideoVlcComponent.cpp | 28 ++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 6642a246..95a07b23 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -17,6 +17,7 @@
+ #include <deque>
+ #include <functional>
+ #include <map>
++#include <set>
+ #include <thread>
+ #include "SystemConf.h"
+ #include "ThemeData.h"
+@@ -314,9 +315,32 @@ VideoVlcComponent::VideoVlcComponent(Window* window) : VideoComponent(window),
+ 	init();
+ }
+ 
++// The videos showing their frames (main thread): a screen shows one at most, so a second one is logged
++static std::set<VideoVlcComponent*> sShownVideos;
++
++static void videoShown(VideoVlcComponent* video, bool shown)
++{
++	if (!shown)
++	{
++		sShownVideos.erase(video);
++		return;
++	}
++
++	sShownVideos.insert(video);
++	if (sShownVideos.size() < 2)
++		return;
++
++	std::string paths;
++	for (auto v : sShownVideos)
++		paths += (paths.empty() ? "" : ", ") + v->getVideoPath();
++
++	LOG(LogWarning) << "VideoCheck: " << sShownVideos.size() << " videos play at once: " << paths;
++}
++
+ VideoVlcComponent::~VideoVlcComponent()
+ {
+ 	stopVideo();
++	videoShown(this, false);
+ }
+ 
+ Vector2f VideoVlcComponent::getSize() const
+@@ -386,6 +410,7 @@ void VideoVlcComponent::onVideoStarted()
+ {
+ 	VideoComponent::onVideoStarted();
+ 	resize();
++	videoShown(this, true);
+ }
+ 
+ void VideoVlcComponent::crop(float left, float top, float right, float bot)
+@@ -1296,6 +1321,8 @@ void VideoVlcComponent::checkStart()
+ 
+ void VideoVlcComponent::stopVideo()
+ {
++	videoShown(this, false);
++
+ 	mIsPlaying = false;
+ 	mIsWaitingForVideoToStart = false;
+ 	mStartDelayed = false;
+@@ -1483,6 +1510,7 @@ void VideoVlcComponent::pauseVideo()
+ 	mIsPlaying = false;
+ 	mIsWaitingForVideoToStart = false;
+ 	mStartDelayed = false;
++	videoShown(this, false);
+ 
+ 	if (mMediaPlayer == NULL)
+ 		stopVideo();

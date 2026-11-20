@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 15:04:44 +0000
+Subject: [PATCH] List the videos playing through the web API
+
+GET /videos gives the paths of the videos showing their frames now, so
+a check can walk the screens and see that each plays one video at most,
+and none where none shows.
+---
+ es-app/src/services/HttpServerThread.cpp     | 19 ++++++++++++++++
+ es-core/src/components/VideoVlcComponent.cpp | 24 +++++++++++++++++++-
+ es-core/src/components/VideoVlcComponent.h   |  2 ++
+ 3 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/es-app/src/services/HttpServerThread.cpp b/es-app/src/services/HttpServerThread.cpp
+index 2bf29f2a..cf3751de 100644
+--- a/es-app/src/services/HttpServerThread.cpp
++++ b/es-app/src/services/HttpServerThread.cpp
+@@ -24,6 +24,7 @@
+ #include "scrapers/ThreadedScraper.h"
+ #include "guis/GuiUpdate.h"
+ #include "ContentInstaller.h"
++#include "components/VideoVlcComponent.h"
+ 
+ /* 
+ 
+@@ -316,6 +317,24 @@ void HttpServerThread::run()
+ 		}
+ 	});	
+ 
++	// The videos playing now (their frames on the screen): a screen plays one at most
++	mHttpServer->Get("/videos", [](const httplib::Request& req, httplib::Response& res)
++	{
++		if (!isAllowed(req, res))
++			return;
++
++		std::string json = "{ \"playing\": [";
++		bool first = true;
++		for (auto path : VideoVlcComponent::shownVideos())
++		{
++			json += std::string(first ? "" : ", ") + "\"" + Utils::String::replace(Utils::String::replace(path, "\\", "\\\\"), "\"", "\\\"") + "\"";
++			first = false;
++		}
++		json += "] }";
++		res.set_content(json, "application/json");
++		res.status = 200;
++	});
++
+ 	mHttpServer->Get(R"(/systems/(/?.*)/logo)", [](const httplib::Request& req, httplib::Response& res)
+ 	{		
+ 		if (!isAllowed(req, res))
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 9d3ff28e..1aa276a7 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -315,19 +315,41 @@ VideoVlcComponent::VideoVlcComponent(Window* window) : VideoComponent(window),
+ 	init();
+ }
+ 
+-// The videos showing their frames (main thread): a screen shows one at most, so a second one is logged
++// The videos showing their frames: a screen shows one at most, so a second one is logged. Changed on the main
++// thread, read by the web API (GET /videos)
+ static std::set<VideoVlcComponent*> sShownVideos;
++static std::vector<std::string> sShownPaths;
++static std::mutex sShownLock;
++
++std::vector<std::string> VideoVlcComponent::shownVideos()
++{
++	std::unique_lock<std::mutex> lock(sShownLock);
++	return sShownPaths;
++}
++
++static void keepShownPaths()
++{
++	std::unique_lock<std::mutex> lock(sShownLock);
++	sShownPaths.clear();
++	for (auto v : sShownVideos)
++		sShownPaths.push_back(v->getVideoPath());
++}
+ 
+ static void videoShown(VideoVlcComponent* video, bool shown)
+ {
+ 	if (!shown)
+ 	{
+ 		if (sShownVideos.erase(video) > 0)
++		{
++			keepShownPaths();
+ 			LOG(LogInfo) << "VideoCheck: " << sShownVideos.size() << (sShownVideos.size() == 1 ? " video plays" : " videos play");
++		}
+ 		return;
+ 	}
+ 
+ 	bool added = sShownVideos.insert(video).second;
++	if (added)
++		keepShownPaths();
+ 	if (sShownVideos.size() < 2)
+ 	{
+ 		if (added)
+diff --git a/es-core/src/components/VideoVlcComponent.h b/es-core/src/components/VideoVlcComponent.h
+index bcf4a301..8f24d189 100644
+--- a/es-core/src/components/VideoVlcComponent.h
++++ b/es-core/src/components/VideoVlcComponent.h
+@@ -75,6 +75,8 @@ public:
+ 	// Waits, at most ms, until the players stopped so far released their audio and video outputs (before a
+ 	// game runs): false when some still stop
+ 	static bool waitForPlayers(int ms);
++	// The videos showing their frames now (any thread): their paths
++	static std::vector<std::string> shownVideos();
+ 
+ 	VideoVlcComponent(Window* window);
+ 	virtual ~VideoVlcComponent();

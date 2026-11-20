@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:07:36 +0000
+Subject: [PATCH] Wait for stopping videos before a game runs
+
+- A launch hides the views, which hands their players to the worker to
+  stop, and runs the game at once: a player still stopping could hold the
+  sound output the game opens. Window::deinit now waits for the worker,
+  at most 1.5 s.
+---
+ es-core/src/Window.cpp                       |  4 ++
+ es-core/src/components/VideoVlcComponent.cpp | 52 +++++++++++++++++++-
+ es-core/src/components/VideoVlcComponent.h   |  3 ++
+ 3 files changed, 57 insertions(+), 2 deletions(-)
+
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index 3e0df578..f4df7684 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -25,6 +25,7 @@
+ #include "components/BatteryIndicatorComponent.h"
+ #include "guis/GuiMsgBox.h"
+ #include "components/VolumeInfoComponent.h"
++#include "components/VideoVlcComponent.h"
+ #include "components/BrightnessInfoComponent.h"
+ #include "Splash.h"
+ #include "PowerSaver.h"
+@@ -202,6 +203,9 @@ void Window::deinit(bool deinitRenderer)
+ 	for(auto i = mGuiStack.cbegin(); i != mGuiStack.cend(); i++)
+ 		(*i)->onHide();
+ 
++	// Their videos stop on a worker: a game run now could find the sound output still held
++	VideoVlcComponent::waitForPlayers(1500);
++
+ 	if (deinitRenderer)
+ 		InputManager::getInstance()->deinit();
+ 
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index 267212e4..5965a574 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -9,6 +9,7 @@
+ #include <vlc/vlc.h>
+ #include <SDL_mutex.h>
+ #include <cmath>
++#include <chrono>
+ #include <condition_variable>
+ #include <deque>
+ #include <functional>
+@@ -103,8 +104,7 @@ namespace
+ 	public:
+ 		static void post(const std::function<void()>& task)
+ 		{
+-			// Never destroyed: the worker outlives main's statics
+-			static PlayerWorker* worker = new PlayerWorker();
++			PlayerWorker* worker = get();
+ 
+ 			std::unique_lock<std::mutex> lock(worker->mLock);
+ 			if (!worker->mStarted)
+@@ -117,9 +117,45 @@ namespace
+ 			worker->mWake.notify_one();
+ 		}
+ 
++		// Waits until the tasks handed over so far ran, at most ms: false when some still run
++		static bool drain(int ms)
++		{
++			PlayerWorker* worker = get();
++			{
++				std::unique_lock<std::mutex> lock(worker->mLock);
++				if (!worker->mStarted)
++					return true;
++			}
++
++			struct Done
++			{
++				std::mutex lock;
++				std::condition_variable wake;
++				bool done = false;
++			};
++
++			auto done = std::make_shared<Done>();
++			post([done]
++			{
++				std::unique_lock<std::mutex> lock(done->lock);
++				done->done = true;
++				done->wake.notify_all();
++			});
++
++			std::unique_lock<std::mutex> lock(done->lock);
++			return done->wake.wait_for(lock, std::chrono::milliseconds(ms), [done] { return done->done; });
++		}
++
+ 	private:
+ 		PlayerWorker() : mStarted(false) { }
+ 
++		static PlayerWorker* get()
++		{
++			// Never destroyed: the worker outlives main's statics
++			static PlayerWorker* worker = new PlayerWorker();
++			return worker;
++		}
++
+ 		void run()
+ 		{
+ 			for (;;)
+@@ -840,6 +876,18 @@ void VideoVlcComponent::init()
+ 	delete[] theArgs;
+ }
+ 
++bool VideoVlcComponent::waitForPlayers(int ms)
++{
++	int start = SDL_GetTicks();
++	bool done = PlayerWorker::drain(ms);
++	if (done)
++		LOG(LogDebug) << "VideoVlcComponent: players stopped in " << (SDL_GetTicks() - start) << " ms";
++	else
++		LOG(LogWarning) << "VideoVlcComponent: players still stopping after " << ms << " ms";
++
++	return done;
++}
++
+ // The first frame VLC displayed: the video shows from now on
+ void VideoVlcComponent::checkDisplayed()
+ {
+diff --git a/es-core/src/components/VideoVlcComponent.h b/es-core/src/components/VideoVlcComponent.h
+index 6979005f..addbcc6b 100644
+--- a/es-core/src/components/VideoVlcComponent.h
++++ b/es-core/src/components/VideoVlcComponent.h
+@@ -70,6 +70,9 @@ class VideoVlcComponent : public VideoComponent
+ 
+ public:
+ 	static void init();
++	// Waits, at most ms, until the players stopped so far released their audio and video outputs (before a
++	// game runs): false when some still stop
++	static bool waitForPlayers(int ms);
+ 
+ 	VideoVlcComponent(Window* window);
+ 	virtual ~VideoVlcComponent();

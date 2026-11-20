@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 10:30:16 +0000
+Subject: [PATCH] Show the visible rows and full scroll travel on themed grid
+ tracks
+
+---
+ es-core/src/ThemeData.cpp                     |  1 +
+ es-core/src/components/ImageGridComponent.h   | 22 +++++++++++++--
+ es-core/src/components/ScrollbarComponent.cpp | 28 ++++++++++++++-----
+ es-core/src/components/ScrollbarComponent.h   |  2 ++
+ 4 files changed, 44 insertions(+), 9 deletions(-)
+
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 5e99f4f2..f0951a86 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -215,6 +215,7 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "scrollSound", PATH },
+ 
+ 		{ "scrollbarColor", COLOR },
++		{ "scrollbarTrackColor", COLOR },
+ 		{ "scrollbarSize", FLOAT },
+ 		{ "scrollbarCorner", FLOAT },
+ 		{ "scrollbarAlignment", STRING },		// left, right, outer left, outer right
+diff --git a/es-core/src/components/ImageGridComponent.h b/es-core/src/components/ImageGridComponent.h
+index acdd2896..ceb60fa3 100644
+--- a/es-core/src/components/ImageGridComponent.h
++++ b/es-core/src/components/ImageGridComponent.h
+@@ -857,9 +857,27 @@ void ImageGridComponent<T>::render(const Transform4x4f& parentTrans)
+ 
+ 		auto scrollableSize = mTileSize + mMargin;
+ 
++		if (mScrollbar.hasTrack() && mPeekSize > 0.0f)
++		{
++			if (isVertical())
++				sz.y() += Math::round(mPeekSize * Renderer::getScreenHeight());
++			else
++				sz.x() += Math::round(mPeekSize * Renderer::getScreenWidth());
++		}
+ 		mScrollbar.setContainerBounds(pos, sz, isVertical());
+-		mScrollbar.setRange(0, mTotalHeight + (isVertical() ? scrollableSize.y() : scrollableSize.y()), isVertical() ? scrollableSize.y() : scrollableSize.y());
+-		mScrollbar.setScrollPosition(mCameraOffset);
++		const float stride = isVertical() ? scrollableSize.y() : scrollableSize.x();
++		if (mScrollbar.hasTrack())
++		{
++			const int columns = getColumnCount();
++			const int rows = (int(mEntries.size()) + columns - 1) / columns;
++			mScrollbar.setRange(0, rows, pageRowCount());
++			mScrollbar.setScrollPosition(stride > 0 ? mCameraOffset / stride : 0);
++		}
++		else
++		{
++			mScrollbar.setRange(0, mTotalHeight + stride, stride);
++			mScrollbar.setScrollPosition(mCameraOffset);
++		}
+ 		mScrollbar.render(parentTrans);
+ 	}
+ }
+diff --git a/es-core/src/components/ScrollbarComponent.cpp b/es-core/src/components/ScrollbarComponent.cpp
+index abfdda57..7cd878f4 100644
+--- a/es-core/src/components/ScrollbarComponent.cpp
++++ b/es-core/src/components/ScrollbarComponent.cpp
+@@ -96,7 +96,7 @@ void ScrollbarComponent::update(int deltaTime)
+ 
+ void ScrollbarComponent::render(const Transform4x4f& parentTrans)
+ {
+-	if (!mEnabled || !mVisible || mMin == mMax || mColor == 0)
++	if (!mEnabled || (!mVisible && !hasTrack()) || mMin == mMax || mColor == 0)
+ 		return;
+ 
+ 	if (mPage >= mMax)
+@@ -116,19 +116,28 @@ void ScrollbarComponent::render(const Transform4x4f& parentTrans)
+ 
+ 
+ 	int reference = mVertical ? getSize().y() : getSize().x();
+-	int thumbHeight = (reference * mPage) / (mMax + 1);
++	// Legacy lists use inclusive pixel ranges. Grids with a track supply row extents.
++	const float extent = mMax - mMin + (hasTrack() ? 0.0f : 1.0f);
++	if (reference <= 0 || extent <= mPage)
++		return;
++	if (hasTrack())
++	{
++		Renderer::drawRect(0, 0, mSize.x(), mSize.y(), mTrackColor);
++		minHeight = std::max(minHeight, int(3 * (mVertical ? mSize.x() : mSize.y())));
++	}
++	int thumbHeight = (reference * mPage) / extent;
+ 	if (thumbHeight < minHeight)
+ 		thumbHeight = minHeight;
+ 
+ 	float radius = (mVertical ? mSize.x() : mSize.y()) * mCornerSize;
+ 	
+-	float top = 0;	
+-	if (((mMax - mPage) + 1) > 0)
+-		top = ((reference - thumbHeight) * mPosition) / ((mMax - mPage) + 1);
++	thumbHeight = std::min(reference, thumbHeight);
++	const float progress = Math::clamp(0.0f, 1.0f, (mPosition - mMin) / (extent - mPage));
++	float top = (reference - thumbHeight) * progress;
+ 	
+ 	int bottom = Math::min( mVertical ? getSize().y() : getSize().x(), top + thumbHeight);
+ 
+-	float opacity = mFadeOutTime == 0 ? 1.0 : (float)mFadeOutTime / (float)FADEOUT_TIME;
++	float opacity = hasTrack() || mFadeOutTime == 0 ? 1.0 : (float)mFadeOutTime / (float)FADEOUT_TIME;
+ 	
+ 	const unsigned int color = (mColor & 0xFFFFFF00) | (unsigned char)((mColor & 0xFF) * opacity);
+ 
+@@ -152,10 +161,14 @@ void ScrollbarComponent::render(const Transform4x4f& parentTrans)
+ 
+ void ScrollbarComponent::fromTheme(const std::shared_ptr<ThemeData>& theme, const std::string& view, const std::string& element, const std::string& containerType)
+ {
++	mTrackColor = 0;
+ 	const ThemeData::ThemeElement* elem = theme->getElement(view, element, containerType);
+ 	if (!elem)
+ 		return;
+ 	
++	if (elem->has("scrollbarTrackColor"))
++		mTrackColor = elem->get<unsigned int>("scrollbarTrackColor");
++
+ 	if (elem->has("scrollbarColor"))
+ 	{
+ 		mEnabled = true;
+@@ -184,7 +197,8 @@ void ScrollbarComponent::fromTheme(const std::shared_ptr<ThemeData>& theme, cons
+ }
+ 
+ void ScrollbarComponent::loadFromMenuTheme()
+-{ 
++{
++	mTrackColor = 0;
+ 	auto theme = ThemeData::getMenuTheme();
+ 	if (theme == nullptr || theme->Background.scrollbarColor == 0)
+ 	{
+diff --git a/es-core/src/components/ScrollbarComponent.h b/es-core/src/components/ScrollbarComponent.h
+index 737d1371..288f72c6 100644
+--- a/es-core/src/components/ScrollbarComponent.h
++++ b/es-core/src/components/ScrollbarComponent.h
+@@ -16,6 +16,7 @@ public:
+ 	ScrollbarComponent(Window* window);
+ 
+ 	bool isEnabled() { return mEnabled; }
++	bool hasTrack() const { return (mTrackColor & 0xFF) != 0; }
+ 
+ 	void update(int deltaTime) override;
+ 	void render(const Transform4x4f& parentTrans) override;
+@@ -54,6 +55,7 @@ private:
+ 	int	  mFadeOutTime;
+ 
+ 	unsigned int mColor;
++	unsigned int mTrackColor = 0;
+ 
+ 	int mAlignment;
+ 

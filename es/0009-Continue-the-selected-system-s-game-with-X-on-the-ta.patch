@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 08:45:45 +0000
+Subject: [PATCH] Continue the selected system's game with X on the tabbed home
+
+On the home, X jumps to a random system. On a tabbed grid that shows
+each system's last game, X is more useful as "continue": start the
+game the selected card shows, the one played last there, else its
+best-rated favorite for a system never played.
+
+With tabs: X launches {system:continue} through ViewController::launch,
+the same path as A on a game, and the help shows "CONTINUE". X does
+nothing when there is no such game, and on tools, emulators and the
+screenshot viewer, so it never runs a tool again unasked. B no longer
+opens the navigation bar, which lists every system while the grid holds
+one tab (L1/R1 move between tabs). Without tabs nothing changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ THEMES.md                       |  3 +++
+ es-app/src/views/SystemView.cpp | 31 ++++++++++++++++++++++++++++---
+ 2 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index d733e73b..0fd2fe4b 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -743,6 +743,9 @@ separated by `,`:
+ * Each visible system is in one tab: the first that lists it. Visible systems that no tab lists go to the
+   tab with `*`, or to the last tab. Hidden and empty systems are left out, and so are tabs with no system.
+ * Going to a system (back from its game list, at start-up) shows its tab.
++* X continues the selected system's game, `{system:continue}`: the one played last, else its best-rated
++  favorite; with neither, and on tools, emulators and screenshots (`{system:hasContinue}` false), X does nothing.
++  B does not open the navigation bar, which lists every system.
+ * `{system:tab}` is the index of the system's tab in the list (0 for the first), -1 without tabs, so the
+   theme can draw the tab row (`"./tabs/" + {system:tab} + ".png"`).
+ * A tab with more systems than the grid shows at once (`autoLayout` columns × rows) uses
+diff --git a/es-app/src/views/SystemView.cpp b/es-app/src/views/SystemView.cpp
+index e2cf60bd..f58dd707 100644
+--- a/es-app/src/views/SystemView.cpp
++++ b/es-app/src/views/SystemView.cpp
+@@ -530,6 +530,21 @@ bool SystemView::input(InputConfig* config, Input input)
+ 
+ 	if (input.value != 0)
+ 	{
++		// Tabs: X continues the selected system's last game, else plays its best-rated favorite; nothing
++		// on tools, emulators and screenshots (it never runs a tool again unasked)
++		if (hasTabs() && config->isMappedTo("x", input))
++		{
++			SystemData* system = getSelected();
++			FileData* game = system != nullptr ? system->getContinueGame() : nullptr;
++			if (game != nullptr)
++			{
++				mCarousel.stopScrolling();
++				ViewController::get()->launch(game);
++			}
++
++			return true;
++		}
++
+ 		bool netPlay = SystemData::isNetplayActivated() && SystemConf::getInstance()->getBool("global.netplay");
+ 		if (netPlay && config->isMappedTo("x", input))
+ 		{
+@@ -586,7 +601,8 @@ bool SystemView::input(InputConfig* config, Input input)
+ 
+ bool SystemView::showNavigationBar()
+ {
+-	if (!SystemData::IsManufacturerSupported)
++	// The bar lists every system, the tabbed grid only one tab's: L1/R1 move between tabs instead
++	if (!SystemData::IsManufacturerSupported || hasTabs())
+ 		return false;
+ 
+ 	auto sortMode = Settings::getInstance()->getString("SortSystems");
+@@ -966,7 +982,16 @@ std::vector<HelpPrompt> SystemView::getHelpPrompts()
+ 
+ 	bool netPlay = SystemData::isNetplayActivated() && SystemConf::getInstance()->getBool("global.netplay");
+ 
+-	if (netPlay)
++	if (hasTabs())
++	{
++		SystemData* system = getSelected();
++		if (system != nullptr && system->getContinueGame() != nullptr)
++			prompts.push_back(HelpPrompt("x", _("CONTINUE")));
++
++		if (SystemData::getSystem("all") != nullptr)
++			prompts.push_back(HelpPrompt("y", _("SEARCH"), [&] { showQuickSearch(); }));
++	}
++	else if (netPlay)
+ 	{
+ 		prompts.push_back(HelpPrompt("x", _("NETPLAY"), [&] { showNetplay(); }));
+ 		prompts.push_back(HelpPrompt("y", _("SEARCH") + std::string("/") + _("RANDOM"), [&] { showQuickSearch(); })); // QUICK 
+@@ -978,7 +1003,7 @@ std::vector<HelpPrompt> SystemView::getHelpPrompts()
+ 			prompts.push_back(HelpPrompt("y", _("SEARCH"), [&] { showQuickSearch(); })); // QUICK 
+ 	}
+ 
+-	if (SystemData::IsManufacturerSupported)
++	if (SystemData::IsManufacturerSupported && !hasTabs())
+ 		prompts.push_back(HelpPrompt("b", _("NAVIGATION BAR"), [&] { showNavigationBar(); }));
+ 
+ #ifdef _ENABLE_FILEMANAGER_

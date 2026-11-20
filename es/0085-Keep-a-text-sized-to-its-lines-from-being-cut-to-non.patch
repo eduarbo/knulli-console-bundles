@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 09:36:12 +0000
+Subject: [PATCH] Keep a text sized to its lines from being cut to none
+
+A multiline text extra aligned to the top is cut to its whole lines on
+screen. Its height, made from its lines when the theme gives it none,
+is a fraction of a pixel more than the rounded rectangle on screen,
+which then held one line less than it has: a one-line title in a stack
+was cut to nothing. The cut keeps the lines the box holds within a
+pixel, and at least one.
+---
+ es-core/src/components/TextComponent.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/es-core/src/components/TextComponent.cpp b/es-core/src/components/TextComponent.cpp
+index ac6c48b4..7b16fb0d 100644
+--- a/es-core/src/components/TextComponent.cpp
++++ b/es-core/src/components/TextComponent.cpp
+@@ -173,11 +173,11 @@ void TextComponent::render(const Transform4x4f& parentTrans)
+ 	{
+ 		if (mExtraType == ExtraType::EXTRACHILDREN && mVerticalAlignment == Alignment::ALIGN_TOP && mMultiline == MultiLineType::MULTILINE && mAutoScroll == AutoScrollType::NONE)
+ 		{
+-			// Clip multiline - non partial lines
++			// Clip multiline - non partial lines (a box made as tall as its lines, then rounded on screen, keeps them)
+ 			auto lineHeight = mFont->getHeight(mLineSpacing);
+ 			if (lineHeight > 0)
+ 			{
+-				auto lines = (int)(rect.h / lineHeight);
++				auto lines = std::max(1, (int)((rect.h + 1) / lineHeight));
+ 				rect.h = lineHeight * lines + 1;
+ 			}
+ 

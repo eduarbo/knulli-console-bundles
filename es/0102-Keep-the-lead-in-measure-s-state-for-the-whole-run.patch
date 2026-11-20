@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 17:41:38 +0000
+Subject: [PATCH] Keep the lead-in measure's state for the whole run
+
+The lead-in worker waited on a condition variable that was a static:
+at exit its destructor waited for that thread, which never wakes, and
+ES hung instead of quitting (an update, a restart). The state is now
+made once and never destroyed, as the players' workers are.
+---
+ es-core/src/components/VideoLeadIn.cpp | 39 ++++++++++++++++++++------
+ 1 file changed, 30 insertions(+), 9 deletions(-)
+
+diff --git a/es-core/src/components/VideoLeadIn.cpp b/es-core/src/components/VideoLeadIn.cpp
+index 41b0dd1d..74de8062 100644
+--- a/es-core/src/components/VideoLeadIn.cpp
++++ b/es-core/src/components/VideoLeadIn.cpp
+@@ -31,15 +31,36 @@ namespace
+ 		bool audio = false;
+ 	};
+ 
+-	std::mutex sLock;
+-	std::condition_variable sWake;
+-	std::map<std::string, Known> sKnown;
+-	std::deque<std::string> sWaiting;
+-	std::set<std::string> sWaitingSet;
+-	bool sLoaded = false;
+-	bool sStarted = false;
+-	bool sPaused = false;
+-	int sAvailable = -1;
++	struct State
++	{
++		std::mutex lock;
++		std::condition_variable wake;
++		std::map<std::string, Known> known;
++		std::deque<std::string> waiting;
++		std::set<std::string> waitingSet;
++		bool loaded = false;
++		bool started = false;
++		bool paused = false;
++		int available = -1;
++	};
++
++	// Never destroyed: the worker waits on it until the process ends (a condition variable destroyed at exit with
++	// a thread waiting on it hangs the exit, and ES would not quit)
++	State& state()
++	{
++		static State* s = new State();
++		return *s;
++	}
++
++	std::mutex& sLock = state().lock;
++	std::condition_variable& sWake = state().wake;
++	std::map<std::string, Known>& sKnown = state().known;
++	std::deque<std::string>& sWaiting = state().waiting;
++	std::set<std::string>& sWaitingSet = state().waitingSet;
++	bool& sLoaded = state().loaded;
++	bool& sStarted = state().started;
++	bool& sPaused = state().paused;
++	int& sAvailable = state().available;
+ 
+ 	std::string cachePath()
+ 	{

@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:18:25 +0000
+Subject: [PATCH] Destroy textures freed on other threads on the render thread
+
+- An image's last reference may be dropped on a loader thread, which then
+  destroyed its texture there: a GL call without the context, and the
+  frame cache (its frame and its set of changed textures) changed from
+  another thread. Such a texture now waits in a locked list; the render
+  thread destroys it before its next frame. The list of an earlier window
+  is dropped with its context.
+---
+ es-core/src/renderers/Renderer.cpp | 44 ++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/es-core/src/renderers/Renderer.cpp b/es-core/src/renderers/Renderer.cpp
+index a1a61992..f71b1d2d 100644
+--- a/es-core/src/renderers/Renderer.cpp
++++ b/es-core/src/renderers/Renderer.cpp
+@@ -14,8 +14,10 @@
+ 
+ #include <SDL.h>
+ #include <deque>
++#include <mutex>
+ #include <set>
+ #include <stack>
++#include <thread>
+ 
+ #if WIN32
+ #include <Windows.h>
+@@ -420,8 +422,23 @@ namespace Renderer
+ 	}
+ 
+ 
++	// GL and the frame cache live on the thread that made the window. A texture freed on another thread (the
++	// last reference to an image dropped by a loader) waits for it.
++	static std::thread::id           renderThread;
++	static std::mutex                pendingLock;
++	static std::vector<unsigned int> pendingTextures;
++
++	static void destroyPendingTextures();
++
+ 	bool init()
+ 	{
++		renderThread = std::this_thread::get_id();
++		{
++			// The textures of an earlier window went with its context
++			std::unique_lock<std::mutex> lock(pendingLock);
++			pendingTextures.clear();
++		}
++
+ 		if (!createWindow())
+ 			return false;
+ 
+@@ -432,6 +449,7 @@ namespace Renderer
+ 
+ 	void deinit()
+ 	{
++		destroyPendingTextures();
+ 		destroyWindow();
+ 
+ 	} // deinit
+@@ -1118,10 +1136,27 @@ namespace Renderer
+ 		}
+ 	}
+ 
++	static void destroyPendingTextures()
++	{
++		std::vector<unsigned int> textures;
++		{
++			std::unique_lock<std::mutex> lock(pendingLock);
++			textures.swap(pendingTextures);
++		}
++
++		for (auto texture : textures)
++		{
++			FrameCache::textureChanged(texture);
++			Instance()->destroyTexture(texture);
++		}
++	}
++
+ 	void beginFrame()
+ 	{
+ 		using namespace FrameCache;
+ 
++		destroyPendingTextures();
++
+ 		frame.commands.clear();
+ 		frame.vertices.clear();
+ 		frame.shaders.clear();
+@@ -1213,6 +1248,13 @@ namespace Renderer
+ 
+ 	void  destroyTexture(const unsigned int _texture)
+ 	{
++		if (std::this_thread::get_id() != renderThread)
++		{
++			std::unique_lock<std::mutex> lock(pendingLock);
++			pendingTextures.push_back(_texture);
++			return;
++		}
++
+ 		FrameCache::textureChanged(_texture);
+ 		Instance()->destroyTexture(_texture);
+ 	}
+@@ -1391,6 +1433,8 @@ namespace Renderer
+ 		}
+ 		else
+ 		{
++			destroyPendingTextures();
++
+ 			// What is on screen now: the textures it uses are as they are
+ 			FrameCache::shownValid = false;
+ 			FrameCache::changedTextures.clear();

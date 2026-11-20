@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 14:40:34 +0000
+Subject: [PATCH] Let a theme frame the selected menu row instead of filling it
+
+A menu list's selected row (menus, option lists, quick access, a
+game's options) is drawn as a bar of the selector colour, in a
+gradient if the theme asks. menutext's selectorPath, selectorCornerSize
+and selectorMargin frame that row with a ninepatch instead: the
+selection is a border, as on the theme's cards, and neither the bar nor
+the hover tint is drawn. Without it nothing changes.
+---
+ THEMES.md                                |  7 +++++++
+ es-core/src/ThemeData.cpp                |  9 +++++++++
+ es-core/src/ThemeData.h                  |  5 ++++-
+ es-core/src/components/ComponentList.cpp | 24 ++++++++++++++++++++++--
+ es-core/src/components/ComponentList.h   |  7 +++++++
+ 5 files changed, 49 insertions(+), 3 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 17c39d2a..16514ff2 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1492,6 +1492,13 @@ BATOCERA 5.24
+ 	- Lists show whole rows only: they scroll by rows and leave out a row they cannot show whole. Default is false.
+ * `valueSpacing` - type: FLOAT. (`menutext` only)
+ 	- The space between a row's value and its chevron, as a fraction of the screen width. Default is 0.005.
++* `selectorPath` - type: PATH. (`menutext` only)
++	- A ninepatch that frames the selected row (and an option list's, a popup's) instead of the selector bar: the
++	  selection is a border; the bar and its hover tint are not drawn. Default: none (the bar).
++* `selectorCornerSize` - type: FLOAT. (`menutext` only)
++	- That ninepatch's corner size, in pixels.
++* `selectorMargin` - type: FLOAT. (`menutext` only)
++	- The space between the frame and the list's sides, as a fraction of the screen width. Default is 0.
+ 	
+ 
+ #### menuSwitch
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index 861f2363..73e98b8f 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -660,6 +660,9 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "fullRows", BOOLEAN },
+ 		{ "valueSpacing", FLOAT },
+ 		{ "atBottom", BOOLEAN },
++		{ "selectorPath", PATH },				// the selected row framed (a ninepatch) instead of filled
++		{ "selectorCornerSize", FLOAT },
++		{ "selectorMargin", FLOAT },
+ 		{ "separatorColor", COLOR },
+ 		{ "selectorColor", COLOR },
+ 		{ "selectorColorEnd", COLOR },
+@@ -2524,6 +2527,12 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			Row.fullRows = elem->get<bool>("fullRows");
+ 		if (elem->has("valueSpacing"))
+ 			Row.valueSpacing = elem->get<float>("valueSpacing") * Renderer::getScreenWidth();
++		if (elem->has("selectorPath") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("selectorPath")))
++			Row.selectorPath = elem->get<std::string>("selectorPath");
++		if (elem->has("selectorCornerSize"))
++			Row.selectorCorner = elem->get<float>("selectorCornerSize");
++		if (elem->has("selectorMargin"))
++			Row.selectorMargin = elem->get<float>("selectorMargin") * Renderer::getScreenWidth();
+ 	}
+ 
+ 	elem = theme->getElement("menu", "menuprompt", "menuPrompt");
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index e5c77c47..1478c387 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -184,6 +184,9 @@ struct MenuRowElement
+ 	float iconSize;	// pixels; 0: 1.25 times the text's letter height
+ 	bool fullRows;	// lists show whole rows only
+ 	float valueSpacing;	// pixels between a row's value and its chevron
++	std::string selectorPath;	// the selected row framed by this ninepatch instead of filled (menutext selectorPath)
++	float selectorCorner;	// its corner size, in pixels
++	float selectorMargin;	// pixels between the frame and the list's sides
+ };
+ 
+ // A prompt in a menu's header (menuPrompt): back, instead of a BACK button
+@@ -269,7 +272,7 @@ public:
+ 		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16), 0, 0, 0.0f };
+ 		TextEditElement TextEdit { nullptr, 0 };
+ 		SliderElement Slider { nullptr, 0, 0, 0.0f, 0.0f };
+-		MenuRowElement Row { 0.0f, 10.0f, 0.0f, false, 0.0f };
++		MenuRowElement Row { 0.0f, 10.0f, 0.0f, false, 0.0f, "", 0.0f, 0.0f };
+ 		PromptElement Prompt { "", nullptr, 0 };
+ 		bool FooterAtBottom = false;	// menufooter atBottom
+ 		TileElement Tile { "", "", Vector2f(16, 16) };
+diff --git a/es-core/src/components/ComponentList.cpp b/es-core/src/components/ComponentList.cpp
+index 3ccb5512..73019cc9 100644
+--- a/es-core/src/components/ComponentList.cpp
++++ b/es-core/src/components/ComponentList.cpp
+@@ -1,4 +1,5 @@
+ #include "components/ComponentList.h"
++#include "components/NinePatchComponent.h"
+ #include "LocaleES.h"
+ #include "TextToSpeech.h"
+ 
+@@ -379,6 +380,17 @@ void ComponentList::render(const Transform4x4f& parentTrans)
+ 	unsigned int textColor = menuTheme->Text.color;
+ 	bool selectorGradientHorz = menuTheme->Text.selectorGradientType;
+ 
++	// A theme's frame for the selected row: the row is framed, never filled
++	const MenuRowElement& rowTheme = menuTheme->Row;
++	if (rowTheme.selectorPath.empty())
++		mSelectorFrame = nullptr;
++	else if (mSelectorFrame == nullptr || mSelectorFramePath != rowTheme.selectorPath)
++	{
++		mSelectorFrame = std::make_shared<NinePatchComponent>(mWindow, rowTheme.selectorPath);
++		mSelectorFrame->setCornerSize(rowTheme.selectorCorner, rowTheme.selectorCorner);
++		mSelectorFramePath = rowTheme.selectorPath;
++	}
++
+ 	Transform4x4f trans = parentTrans * getTransform();
+ 
+ 	// clip everything to be inside our bounds (with whole rows only, to the last whole row)
+@@ -404,7 +416,15 @@ void ComponentList::render(const Transform4x4f& parentTrans)
+ 
+ 		if (y - mCameraOffset + rowHeight >= 0)
+ 		{
+-			if (mFocused && entry.data.selectable && i == mCursor)
++			if (mFocused && entry.data.selectable && i == mCursor && mSelectorFrame != nullptr)
++			{
++				float margin = rowTheme.selectorMargin;
++				mSelectorFrame->setPosition(margin, mSelectorBarOffset);
++				mSelectorFrame->setSize(Math::max(0.0f, mSize.x() - 2 * margin), rowHeight);
++				mSelectorFrame->setOpacity((unsigned char)(255 * opacity));
++				mSelectorFrame->render(trans);
++			}
++			else if (mFocused && entry.data.selectable && i == mCursor)
+ 			{
+ 				Renderer::setMatrix(trans);
+ 
+@@ -418,7 +438,7 @@ void ComponentList::render(const Transform4x4f& parentTrans)
+ 				}
+ 			}
+ 
+-			if (i == mHotRow)
++			if (i == mHotRow && mSelectorFrame == nullptr)
+ 			{
+ 				Renderer::setMatrix(trans);
+ 
+diff --git a/es-core/src/components/ComponentList.h b/es-core/src/components/ComponentList.h
+index 297c65c9..54c387a9 100644
+--- a/es-core/src/components/ComponentList.h
++++ b/es-core/src/components/ComponentList.h
+@@ -6,6 +6,9 @@
+ #include "LocaleES.h"
+ #include "components/ScrollbarComponent.h"
+ #include "math/Vector2i.h"
++#include <memory>
++
++class NinePatchComponent;
+ 
+ namespace ComponentListFlags
+ {
+@@ -139,6 +142,10 @@ private:
+ 	float mSelectorBarOffset;
+ 	float mCameraOffset;
+ 
++	// The selected row's frame when the menu theme has one (menutext selectorPath): a border, no fill
++	std::shared_ptr<NinePatchComponent> mSelectorFrame;
++	std::string mSelectorFramePath;
++
+ 	ComponentListFlags::UpdateType mUpdateType;
+ 
+ 	std::function<void(CursorState state)> mCursorChangedCallback;

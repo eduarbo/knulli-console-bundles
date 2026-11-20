@@ -1,0 +1,444 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 08:22:09 +0000
+Subject: [PATCH] Let a theme style the on-screen keyboard and show its focus
+
+The on-screen keyboard opened on its text field, which a pad cannot
+type into, so no key showed the focus, and the caret was dimmed or
+blinked away. Its keys were drawn with the stock button images, a
+tiny check for accept and a blank space bar.
+
+A theme can now give the keys their own look with a menuKeyboard
+element: images for a key, the focused key and a toggled SHIFT or
+ALT (drawn untinted), the spacing between keys, the label font and
+colours, words instead of glyphs for delete, space and accept, and
+opening on the first letter key. menuTextEdit gains a font and a
+caret colour, kept at full strength while the keys type into the
+field. Without these properties the keyboard is unchanged.
+---
+ THEMES.md                                     | 39 +++++++++
+ es-core/src/ThemeData.cpp                     | 43 +++++++++-
+ es-core/src/ThemeData.h                       | 24 ++++++
+ es-core/src/components/ButtonComponent.cpp    | 42 +++++++++-
+ es-core/src/components/ButtonComponent.h      | 10 +++
+ es-core/src/components/TextEditComponent.cpp  | 10 ++-
+ es-core/src/guis/GuiTextEditPopupKeyboard.cpp | 80 ++++++++++++++++++-
+ es-core/src/guis/GuiTextEditPopupKeyboard.h   |  3 +
+ 8 files changed, 246 insertions(+), 5 deletions(-)
+
+diff --git a/THEMES.md b/THEMES.md
+index 1f98a346..51f38418 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -833,6 +833,10 @@ ES versions with slides support the feature `slideshow`.
+ 	- Image for the slider knob in menus
+ * `menuButton name="menubutton"` - PATH | FILLEDPATH
+ 	- Images for menu buttons
++* `menuTextEdit name="menutextedit"` - ACTIVE | INACTIVE | FONTPATH | FONTSIZE | CARETCOLOR
++	- The text field of the on-screen keyboard and other text popups
++* `menuKeyboard name="menukeyboard"` - PATH | FOCUSEDPATH | ACTIVEPATH | CORNERSIZE | SPACING | FONTPATH | FONTSIZE | COLOR | SELECTEDCOLOR | WORDKEYS | FOCUSKEYS
++	- The on-screen keyboard's keys
+ * `menuText name="menutext"` - FONTPATH | FONTSIZE | COLOR
+ 	- text for all menu entries
+ * `menuText name="menutitle"` - FONTPATH | FONTSIZE | COLOR
+@@ -1484,6 +1488,41 @@ BATOCERA 5.24 - replace the textbox background images in OSK
+   - Image path when the textbox is not selected
+ * `active` - type: PATH. 
+   - Image path when the textbox is selected.
++* `fontPath` - type: PATH.
++  - The text's font. Default is ES's light font.
++* `fontSize` - type: FLOAT.
++  - The text's size, as a fraction of the screen height.
++* `caretColor` - type: COLOR.
++  - The caret's colour, kept at full strength while the field is not edited (the on-screen keyboard types into
++    it from its keys). Default: the menu text's colour, dimmed while the field is not edited.
++
++#### menuKeyboard
++
++The on-screen keyboard's keys (`menuKeyboard name="menukeyboard"`). Without `path` and `focusedPath` the keyboard
++keeps its stock look. The images are ninepatches drawn as they are, with no tint.
++
++* `path` - type: PATH.
++  - A key.
++* `focusedPath` - type: PATH.
++  - The focused key.
++* `activePath` - type: PATH.
++  - SHIFT or ALT while on. Default: `path` tinted.
++* `cornerSize` - type: NORMALIZED_PAIR.
++  - The images' corner size, in pixels. Default is `16 16`.
++* `spacing` - type: FLOAT.
++  - The space between two keys, as a fraction of the screen width.
++* `fontPath` - type: PATH.
++* `fontSize` - type: FLOAT.
++  - The letters' font. Words (below, RESET and CANCEL) take the `menutextsmall` font. Default: `menutext`'s.
++* `color` - type: COLOR.
++  - The labels' colour. Default: `menutext`'s colour.
++* `selectedColor` - type: COLOR.
++  - The focused key's label colour. Default: `menutext`'s `selectedColor`.
++* `wordKeys` - type: BOOLEAN.
++  - Name the delete, space and accept keys (`DELETE`, `SPACE`, `ACCEPT` in the catalogue) instead of their glyphs,
++    and write every word key with a first capital. Default is false.
++* `focusKeys` - type: BOOLEAN.
++  - Open the keyboard on its first letter key instead of the text field, for pads. Default is false.
+ 
+ #### menuIcons
+ 
+diff --git a/es-core/src/ThemeData.cpp b/es-core/src/ThemeData.cpp
+index dd3a7339..c7178d09 100644
+--- a/es-core/src/ThemeData.cpp
++++ b/es-core/src/ThemeData.cpp
+@@ -681,7 +681,22 @@ std::map<std::string, std::map<std::string, ThemeData::ElementPropertyType>> The
+ 		{ "pathOff", PATH } } },
+ 	{ "menuTextEdit",{
+ 		{ "active", PATH },
+-		{ "inactive", PATH } } },
++		{ "inactive", PATH },
++		{ "fontPath", PATH },
++		{ "fontSize", FLOAT },
++		{ "caretColor", COLOR } } },
++	{ "menuKeyboard",{
++		{ "path", PATH },
++		{ "focusedPath", PATH },
++		{ "activePath", PATH },
++		{ "cornerSize", NORMALIZED_PAIR },
++		{ "spacing", FLOAT },
++		{ "fontPath", PATH },
++		{ "fontSize", FLOAT },
++		{ "color", COLOR },
++		{ "selectedColor", COLOR },
++		{ "wordKeys", BOOLEAN },
++		{ "focusKeys", BOOLEAN } } },
+ 	{ "menuSlider",{
+ 		{ "path", PATH } } },
+ 	{ "menuButton",{
+@@ -2488,6 +2503,32 @@ ThemeData::ThemeMenu::ThemeMenu(ThemeData* theme)
+ 			Icons.textinput_ninepatch_active = elem->get<std::string>("active");
+ 		if (elem->has("inactive") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("inactive")))
+ 			Icons.textinput_ninepatch = elem->get<std::string>("inactive");
++		if (elem->has("fontPath") || elem->has("fontSize"))
++			TextEdit.font = Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_MEDIUM), true);
++		if (elem->has("caretColor"))
++			TextEdit.caretColor = elem->get<unsigned int>("caretColor");
++	}
++
++	elem = theme->getElement("menu", "menukeyboard", "menuKeyboard");
++	if (elem && elem->has("path") && elem->has("focusedPath") &&
++		ResourceManager::getInstance()->fileExists(elem->get<std::string>("path")) &&
++		ResourceManager::getInstance()->fileExists(elem->get<std::string>("focusedPath")))
++	{
++		Keyboard.path = elem->get<std::string>("path");
++		Keyboard.focusedPath = elem->get<std::string>("focusedPath");
++		if (elem->has("activePath") && ResourceManager::getInstance()->fileExists(elem->get<std::string>("activePath")))
++			Keyboard.activePath = elem->get<std::string>("activePath");
++		if (elem->has("cornerSize"))
++			Keyboard.cornerSize = elem->get<Vector2f>("cornerSize");
++		if (elem->has("spacing"))
++			Keyboard.spacing = elem->get<float>("spacing") * Renderer::getScreenWidth();
++		Keyboard.color = elem->has("color") ? elem->get<unsigned int>("color") : Text.color;
++		Keyboard.selectedColor = elem->has("selectedColor") ? elem->get<unsigned int>("selectedColor") : Text.selectedColor;
++		Keyboard.font = (elem->has("fontPath") || elem->has("fontSize")) ? Font::getFromTheme(elem, ThemeFlags::ALL, Font::get(FONT_SIZE_MEDIUM), true) : Text.font;
++		if (elem->has("wordKeys"))
++			Keyboard.wordKeys = elem->get<bool>("wordKeys");
++		if (elem->has("focusKeys"))
++			Keyboard.focusKeys = elem->get<bool>("focusKeys");
+ 	}
+ 
+ 	elem = theme->getElement("menu", "menuswitch", "menuSwitch");
+diff --git a/es-core/src/ThemeData.h b/es-core/src/ThemeData.h
+index cb67617f..07bafad5 100644
+--- a/es-core/src/ThemeData.h
++++ b/es-core/src/ThemeData.h
+@@ -172,6 +172,28 @@ struct ButtonElement
+ 	Vector2f	cornerSize;
+ };
+ 
++// The text field of the on-screen keyboard and of other text popups (menuTextEdit)
++struct TextEditElement
++{
++	std::shared_ptr<Font> font;	// nullptr: ES's own
++	unsigned int caretColor;	// 0: the menu text's colour, dimmed while the field is not edited
++};
++
++// The on-screen keyboard's keys (menuKeyboard); the stock look while path is empty
++struct KeyboardElement
++{
++	std::string path;			// a key
++	std::string focusedPath;	// the focused key
++	std::string activePath;		// SHIFT or ALT while on
++	Vector2f	cornerSize;
++	float		spacing;		// pixels between two keys
++	unsigned int color;
++	unsigned int selectedColor;
++	std::shared_ptr<Font> font;	// the letters; words take the menu's small text font
++	bool		wordKeys;		// delete, space and accept as words
++	bool		focusKeys;		// open on the first letter key instead of the text field
++};
++
+ class ThemeData
+ {
+ 	friend class GuiComponent;
+@@ -190,6 +212,8 @@ public:
+ 		MenuGroupElement Group{ 0x777777FF, 0x00000010, 0xC6C7C6FF, 2.0, "", nullptr, 0 /*ALIGN_LEFT*/, false };
+ 		IconElement Icons { ":/on.svg", ":/off.svg", ":/auto.svg", ":/option_arrow.svg", ":/arrow.svg", ":/slider_knob.svg", ":/textinput_ninepatch.png", ":/textinput_ninepatch_active.png" };
+ 		ButtonElement Button { ":/button.png", ":/button_filled.png", Vector2f(16,16) };
++		TextEditElement TextEdit { nullptr, 0 };
++		KeyboardElement Keyboard { "", "", "", Vector2f(16, 16), 0.0f, 0xFFFFFFFF, 0xFFFFFFFF, nullptr, false, false };
+ 
+ 		std::string getMenuIcon(const std::string name)
+ 		{
+diff --git a/es-core/src/components/ButtonComponent.cpp b/es-core/src/components/ButtonComponent.cpp
+index 7dba36c6..77183b52 100644
+--- a/es-core/src/components/ButtonComponent.cpp
++++ b/es-core/src/components/ButtonComponent.cpp
+@@ -82,6 +82,36 @@ void ButtonComponent::setText(const std::string& text, const std::string& helpTe
+ 	updateHelpPrompts();
+ }
+ 
++void ButtonComponent::setImages(const std::string& path, const std::string& focusedPath, const std::string& activePath, const Vector2f& cornerSize)
++{
++	mImagePath = path;
++	mFocusedImagePath = focusedPath;
++	mActiveImagePath = activePath;
++	mBox.setCornerSize(cornerSize);
++	updateImage();
++	onSizeChanged();
++}
++
++void ButtonComponent::setFont(const std::shared_ptr<Font>& font)
++{
++	if (font == nullptr || font == mFont)
++		return;
++
++	auto size = mSize;
++	mFont = font;
++	setText(mText, mHelpText, false);
++	setSize(size);
++}
++
++void ButtonComponent::setTextColors(unsigned int color, unsigned int focusedColor)
++{
++	mTextColorUnfocused = color;
++	mTextColorFocused = focusedColor;
++
++	if (mTextCache)
++		mTextCache->setColor(getCurTextColor());
++}
++
+ void ButtonComponent::onFocusGained()
+ {
+ 	if (mFocused)
+@@ -118,6 +148,16 @@ void ButtonComponent::updateImage()
+ 		return;
+ 	}
+ 
++	if (!mImagePath.empty())
++	{
++		bool active = mNewColor && !mActiveImagePath.empty();
++		unsigned int color = (mNewColor && !active) ? mModdedColor : Utils::HtmlColor::applyColorOpacity(0xFFFFFFFF, getOpacity());
++		mBox.setImagePath(active ? mActiveImagePath : (mFocused ? mFocusedImagePath : mImagePath));
++		mBox.setCenterColor(color);
++		mBox.setEdgeColor(color);
++		return;
++	}
++
+ 	if (mNewColor)
+ 	{
+ 		mBox.setImagePath(ThemeData::getMenuTheme()->Button.filledPath);
+@@ -135,7 +175,7 @@ void ButtonComponent::render(const Transform4x4f& parentTrans)
+ {
+ 	Transform4x4f trans = parentTrans * getTransform();
+ 
+-	if (mRenderNonFocusedBackground || mFocused)
++	if (mRenderNonFocusedBackground || mFocused || !mImagePath.empty())
+ 		mBox.render(trans);
+ 	else
+ 	{
+diff --git a/es-core/src/components/ButtonComponent.h b/es-core/src/components/ButtonComponent.h
+index bc7a3cf1..fe2d7cdc 100644
+--- a/es-core/src/components/ButtonComponent.h
++++ b/es-core/src/components/ButtonComponent.h
+@@ -36,6 +36,12 @@ public:
+ 
+ 	void setRenderNonFocusedBackground(bool value) { mRenderNonFocusedBackground = value; }
+ 
++	// Draws the button with these images as they are (no tint): path, focusedPath when focused and
++	// activePath under a colour shift (a toggled key), instead of the menu theme's button
++	void setImages(const std::string& path, const std::string& focusedPath, const std::string& activePath, const Vector2f& cornerSize);
++	void setFont(const std::shared_ptr<Font>& font);
++	void setTextColors(unsigned int color, unsigned int focusedColor);
++
+ 	void onPaddingChanged();
+ 
+ 	bool hasFocus() { return mFocused; }
+@@ -68,6 +74,10 @@ private:
+ 
+ 	bool mRenderNonFocusedBackground;
+ 	bool mMousePressed;
++
++	std::string mImagePath;
++	std::string mFocusedImagePath;
++	std::string mActiveImagePath;
+ };
+ 
+ #endif // ES_CORE_COMPONENTS_BUTTON_COMPONENT_H
+diff --git a/es-core/src/components/TextEditComponent.cpp b/es-core/src/components/TextEditComponent.cpp
+index f9749ebf..6bb67575 100644
+--- a/es-core/src/components/TextEditComponent.cpp
++++ b/es-core/src/components/TextEditComponent.cpp
+@@ -24,6 +24,9 @@ TextEditComponent::TextEditComponent(Window* window) : GuiComponent(window),
+ 	auto theme = ThemeData::getMenuTheme();
+ 	mBox.setImagePath(ThemeData::getMenuTheme()->Icons.textinput_ninepatch);
+ 
++	if (theme->TextEdit.font != nullptr)
++		mFont = theme->TextEdit.font;
++
+ 	addChild(&mBox);
+ 	
+ 	onFocusLost();
+@@ -363,8 +366,13 @@ void TextEditComponent::render(const Transform4x4f& parentTrans)
+ 		{
+ 			float cursorHeight = mFont->getHeight() * 0.8f;
+ 
++			// A theme's caret colour is kept while the field is not edited: the on-screen keyboard types into it
++			// from its keys, so the caret shows where the next letter goes
++			auto caretColor = ThemeData::getMenuTheme()->TextEdit.caretColor;
+ 			auto cursorColor = (ThemeData::getMenuTheme()->Text.color & 0xFFFFFF00) | getOpacity();
+-			if (!mEditing)
++			if (caretColor != 0)
++				cursorColor = (caretColor & 0xFFFFFF00) | (unsigned char)((caretColor & 0xFF) * getOpacity() / 255.0f);
++			else if (!mEditing)
+ 				cursorColor = (ThemeData::getMenuTheme()->Text.color & 0xFFFFFF00) | (unsigned char) (getOpacity() * 0.25f);
+ 
+ 			Renderer::drawRect(cursorPos.x(), cursorPos.y() + (mFont->getHeight() - cursorHeight) / 2, 2.0f, cursorHeight, cursorColor, cursorColor); // 0x000000FF
+diff --git a/es-core/src/guis/GuiTextEditPopupKeyboard.cpp b/es-core/src/guis/GuiTextEditPopupKeyboard.cpp
+index 26c65dbe..b59e1fd9 100644
+--- a/es-core/src/guis/GuiTextEditPopupKeyboard.cpp
++++ b/es-core/src/guis/GuiTextEditPopupKeyboard.cpp
+@@ -96,6 +96,37 @@ std::vector<std::vector<const char*>> kbKr{
+ 	{ "SHIFT", "-colspan-", "SPACE", "-colspan-", "-colspan-", "-colspan-", "-colspan-", "-colspan-", "-colspan-", "RESET", "-colspan-", "CANCEL", "-colspan-" }
+ };
+ 
++// A word as a key shows it: its first letter a capital
++static std::string capitalize(const std::string& text)
++{
++	std::string lower = Utils::String::toLower(text);
++	if (lower.empty())
++		return lower;
++
++	size_t next = Utils::String::nextCursor(lower, 0);
++	return Utils::String::toUpper(lower.substr(0, next)) + lower.substr(next);
++}
++
++// What a key shows. The theme's word keys (menuKeyboard wordKeys) name delete, space and accept instead of
++// their glyphs (a blank for space), and write every word key as a word.
++static std::string keyLabel(const std::string& key)
++{
++	auto theme = ThemeData::getMenuTheme();
++	if (theme->Keyboard.path.empty() || !theme->Keyboard.wordKeys)
++		return key;
++
++	if (key == _U("\uF177"))
++		return capitalize(_("DELETE"));
++	if (key == _U("\uF058"))
++		return capitalize(_("ACCEPT"));
++	if (key == " " || key == "SPACE")
++		return capitalize(_("SPACE"));
++	if (key == _("RESET") || key == _("CANCEL"))
++		return capitalize(key);
++
++	return key;
++}
++
+ GuiTextEditPopupKeyboard::GuiTextEditPopupKeyboard(Window* window, const std::string& title, const std::string& initValue,
+ 	const std::function<void(const std::string&)>& okCallback, bool multiLine, const std::string acceptBtnText)
+ 	: GuiComponent(window), mBackground(window, ":/frame.png"), mGrid(window, Vector2i(1, 6)), mMultiLine(multiLine)
+@@ -217,8 +248,14 @@ GuiTextEditPopupKeyboard::GuiTextEditPopupKeyboard(Window* window, const std::st
+ 				else
+ 					button = makeButton(lower, upper, lowerAlted, upperAlted);
+ 
+-				button->setPadding(Vector4f(BUTTON_GRID_HORIZ_PADDING / 4.0f, BUTTON_GRID_HORIZ_PADDING / 4.0f, BUTTON_GRID_HORIZ_PADDING / 4.0f, BUTTON_GRID_HORIZ_PADDING / 4.0f));
+-				button->setRenderNonFocusedBackground(false);
++				if (theme->Keyboard.path.empty())
++				{
++					button->setPadding(Vector4f(BUTTON_GRID_HORIZ_PADDING / 4.0f, BUTTON_GRID_HORIZ_PADDING / 4.0f, BUTTON_GRID_HORIZ_PADDING / 4.0f, BUTTON_GRID_HORIZ_PADDING / 4.0f));
++					button->setRenderNonFocusedBackground(false);
++				}
++				else
++					styleKey(button, button->getText());
++
+ 				buttons.push_back(button);
+ 
+ 				int colSpan = 1;
+@@ -250,6 +287,13 @@ GuiTextEditPopupKeyboard::GuiTextEditPopupKeyboard(Window* window, const std::st
+ 	// Add keyboard keys
+ 	mGrid.setEntry(mKeyboardGrid, Vector2i(0, 2), true, true, Vector2i(2, 4));
+ 
++	// A pad has no use for the text field: open on the first letter key, the caret still in the field
++	if (!theme->Keyboard.path.empty() && theme->Keyboard.focusKeys)
++	{
++		mGrid.setCursorTo(mKeyboardGrid);
++		mKeyboardGrid->setCursorTo(Vector2i(0, 1));
++	}
++
+ 	// Determine size from text size
+ 	float textHeight = mText->getFont()->getHeight();
+ 	if (multiLine)
+@@ -426,12 +470,44 @@ void GuiTextEditPopupKeyboard::updateKeyboardButtons()
+ 			: (mShift) ? kb.shiftedKey
+ 			: kb.key;
+ 
++		if (!ThemeData::getMenuTheme()->Keyboard.path.empty())
++		{
++			setKeyLabel(kb.button, text);
++			continue;
++		}
++
+ 		auto sz = kb.button->getSize();
+ 		kb.button->setText(text, text, false);
+ 		kb.button->setSize(sz);
+ 	}
+ }
+ 
++// The theme's key (menuKeyboard): its images untinted, the spacing as padding, its label colours and font
++void GuiTextEditPopupKeyboard::styleKey(const std::shared_ptr<ButtonComponent>& button, const std::string& key)
++{
++	auto& keyboard = ThemeData::getMenuTheme()->Keyboard;
++
++	float pad = keyboard.spacing / 2.0f;
++	button->setPadding(Vector4f(pad, pad, pad, pad));
++	button->setImages(keyboard.path, keyboard.focusedPath, keyboard.activePath, keyboard.cornerSize);
++	button->setTextColors(keyboard.color, keyboard.selectedColor);
++	setKeyLabel(button, key);
++}
++
++// A key's label: one character in the keyboard's font, a word in the menu's small text font
++void GuiTextEditPopupKeyboard::setKeyLabel(const std::shared_ptr<ButtonComponent>& button, const std::string& key)
++{
++	auto theme = ThemeData::getMenuTheme();
++
++	std::string label = keyLabel(key);
++	bool word = !label.empty() && Utils::String::nextCursor(label, 0) < label.size();
++
++	auto sz = button->getSize();
++	button->setFont(word ? theme->TextSmall.font : theme->Keyboard.font);
++	button->setText(label, label, false);
++	button->setSize(sz);
++}
++
+ // Shifts the keys when user hits the shift button.
+ void GuiTextEditPopupKeyboard::shiftKeys() 
+ {
+diff --git a/es-core/src/guis/GuiTextEditPopupKeyboard.h b/es-core/src/guis/GuiTextEditPopupKeyboard.h
+index d90b75e8..e30d1c39 100644
+--- a/es-core/src/guis/GuiTextEditPopupKeyboard.h
++++ b/es-core/src/guis/GuiTextEditPopupKeyboard.h
+@@ -36,6 +36,9 @@ private:
+ 	std::shared_ptr<ButtonComponent> mShiftButton;	
+ 	std::shared_ptr<ButtonComponent> mAltButton;
+ 
++	void styleKey(const std::shared_ptr<ButtonComponent>& button, const std::string& key);
++	void setKeyLabel(const std::shared_ptr<ButtonComponent>& button, const std::string& key);
++
+ 	void toggleKeyState(bool& state, std::shared_ptr<ButtonComponent>& button);
+ 	void updateKeyboardButtons();
+ 	void shiftKeys();

@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 09:18:56 +0000
+Subject: [PATCH] Resume the global last game with a foreground hotkey and A
+ chord
+
+---
+ es-app/src/views/ViewController.cpp | 18 ++++++++++++++++++
+ es-core/src/InputConfig.cpp         | 23 +++++++++++++++++++++++
+ es-core/src/InputConfig.h           |  9 +++++++++
+ es-core/src/InputManager.cpp        |  9 +++++++++
+ es-core/src/InputManager.h          |  1 +
+ es-core/src/Window.cpp              |  4 +++-
+ 6 files changed, 63 insertions(+), 1 deletion(-)
+
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index a124a639..6546d31d 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -1059,6 +1059,24 @@ bool ViewController::input(InputConfig* config, Input input)
+ 	    Settings::getInstance()->saveFile();
+ 	  }
+ 
++	// Claim A before the browser opens the focused card. Modal dialogs and games own their own input.
++	if (input.value && config->hotkeyHeld() && config->isMappedTo("a", input) && !config->isMappedTo("hotkey", input)
++		&& (mState.viewing == SYSTEM_SELECT || mState.viewing == GAME_LIST) && mState.system)
++	{
++		auto theme = mState.system->getTheme();
++		auto marker = theme ? theme->getVariable("esResumeChordMarker") : std::string();
++		if (!marker.empty() && Utils::FileSystem::isRegularFile(marker) && SystemConf::getInstance()->get("system.quickresume") != "0")
++		{
++			config->consumeHotkeyConfirm();
++			auto game = SystemData::getConsoleLastPlayedGame();
++			if (game)
++				launch(game);
++			else
++				mWindow->displayNotificationMessage(_("NO RECENT GAMES"));
++			return true;
++		}
++	}
++
+ 	// open menu
+ 	if(config->isMappedTo("start", input) && input.value != 0)
+ 	{
+diff --git a/es-core/src/InputConfig.cpp b/es-core/src/InputConfig.cpp
+index 0b2c80fe..510100a8 100644
+--- a/es-core/src/InputConfig.cpp
++++ b/es-core/src/InputConfig.cpp
+@@ -224,6 +224,29 @@ bool InputConfig::isMappedTo(const std::string& name, Input input, bool reversed
+ 	return false;
+ }
+ 
++bool InputConfig::updateHotkey(Input input)
++{
++	if (input.type != TYPE_BUTTON && input.type != TYPE_KEY)
++		return false;
++	if (isMappedTo("hotkey", input))
++	{
++		mHotkeyHeld = input.value != 0;
++		if (!mHotkeyHeld)
++			mChordSpent = false;
++		return false;
++	}
++	if (!isMappedTo("a", input))
++		return false;
++	if (!input.value)
++	{
++		bool consumed = mSuppressConfirmUp;
++		mSuppressConfirmUp = false;
++		return consumed;
++	}
++	mSuppressConfirmUp = mHotkeyHeld && mChordSpent;
++	return mSuppressConfirmUp;
++}
++
+ bool InputConfig::isMappedLike(const std::string& name, Input input)
+ {
+ 	if (name == "left")
+diff --git a/es-core/src/InputConfig.h b/es-core/src/InputConfig.h
+index ae5e15dc..8a400c80 100644
+--- a/es-core/src/InputConfig.h
++++ b/es-core/src/InputConfig.h
+@@ -166,6 +166,12 @@ public:
+ 
+ 	bool isConfigured();
+ 
++	// Modifier state follows this device's event stream, including releases delivered over a modal.
++	bool updateHotkey(Input input);
++	bool hotkeyHeld() const { return mHotkeyHeld; }
++	void releaseHotkey() { mHotkeyHeld = mChordSpent = false; }
++	void consumeHotkeyConfirm() { mChordSpent = mSuppressConfirmUp = true; }
++
+ 	static std::string buttonLabel(const std::string& button);
+ 	static std::string buttonDisplayName(const std::string& button);	
+ 	static std::string buttonImage(const std::string& button);
+@@ -173,6 +179,9 @@ public:
+ 	void updateBatteryLevel(int level) { mBatteryLevel = level; }; 
+ 
+ private:
++	bool mHotkeyHeld = false;
++	bool mChordSpent = false;
++	bool mSuppressConfirmUp = false;
+ 	std::map<std::string, Input> mNameMap;
+ 	const int mDeviceId;
+ 	const int mDeviceIndex; 
+diff --git a/es-core/src/InputManager.cpp b/es-core/src/InputManager.cpp
+index ded25d44..ad65ee44 100644
+--- a/es-core/src/InputManager.cpp
++++ b/es-core/src/InputManager.cpp
+@@ -455,6 +455,15 @@ typedef struct SDL_JoyBatteryEventX
+ } SDL_JoyBatteryEventX;
+ #endif
+ 
++// Releases can occur while an emulator owns input. Require a fresh modifier press on return.
++void InputManager::releaseHotkeys()
++{
++	for (const auto& item : mInputConfigs)
++		item.second->releaseHotkey();
++	if (mKeyboardInputConfig)
++		mKeyboardInputConfig->releaseHotkey();
++}
++
+ bool InputManager::parseEvent(const SDL_Event& ev, Window* window)
+ {
+ 	bool causedEvent = false;
+diff --git a/es-core/src/InputManager.h b/es-core/src/InputManager.h
+index c9ef0e5c..15a53a12 100644
+--- a/es-core/src/InputManager.h
++++ b/es-core/src/InputManager.h
+@@ -68,6 +68,7 @@ public:
+ 
+ 	GunManager* getGunManager() { return mGunManager; }
+ 
++	void releaseHotkeys();
+ 	void sendMouseClick(Window* window, int button);
+ 	InputConfig* getInputConfigByDevice(int deviceId);
+ 
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index fab30037..0d7c0a57 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -236,6 +236,8 @@ bool Window::deinit(bool deinitRenderer, bool forGame)
+ 
+ 	if (deinitRenderer)
+ 		InputManager::getInstance()->deinit();
++	else if (forGame)
++		InputManager::getInstance()->releaseHotkeys();
+ 
+ 	TextureResource::clearQueue();
+ 	ResourceManager::getInstance()->unloadAll();
+@@ -253,7 +255,7 @@ void Window::textInput(const char* text)
+ 
+ void Window::input(InputConfig* config, Input input)
+ {
+-	if (config == nullptr)
++	if (config == nullptr || config->updateHotkey(input))
+ 		return;
+ 	
+ 	if (config->getDeviceIndex() >= 0 && Settings::getInstance()->getBool("FirstJoystickOnly"))

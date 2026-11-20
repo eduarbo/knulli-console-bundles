@@ -1,0 +1,390 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eduardo Ruiz <335073+eduarbo@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 06:58:29 +0000
+Subject: [PATCH] Keep a picture's own shape in screen-shaped tiles, and check
+ it
+
+- imageSizeMode "screen" for a grid tile: like "size", the picture takes
+  the tile's shape (a TV game's capture at 4:3), but one turned the other
+  way than the tile (an upright arcade game's capture in a landscape
+  tile) takes the tile's shape turned, as tall as the tile and centred,
+  instead of being stretched across it. The selected tile's video too.
+  ImageComponent and VideoComponent: setKeepOrientation, applied when
+  both sides of the size are set (ScreenShape::fit).
+- A check for render tests, on with the environment variable
+  ES_IMAGE_ASPECT: every image, video frame and slide drawn at another
+  aspect ratio than the part of its texture it shows is logged once per
+  element, source and size ("ImageAspect: ..."), so a test can fail on
+  any stretch a theme did not mean.
+- THEMES.md: imageSizeMode "screen".
+---
+ THEMES.md                                     |  3 +
+ es-core/src/components/GridTileComponent.cpp  | 15 ++++-
+ es-core/src/components/GridTileComponent.h    |  6 ++
+ es-core/src/components/ImageAspectCheck.h     | 58 +++++++++++++++++++
+ es-core/src/components/ImageComponent.cpp     | 18 +++++-
+ es-core/src/components/ImageComponent.h       |  4 ++
+ es-core/src/components/ScreenShape.h          | 32 ++++++++++
+ es-core/src/components/SlideshowComponent.cpp |  2 +
+ es-core/src/components/VideoComponent.cpp     |  1 +
+ es-core/src/components/VideoComponent.h       |  4 ++
+ es-core/src/components/VideoVlcComponent.cpp  |  6 ++
+ 11 files changed, 147 insertions(+), 2 deletions(-)
+ create mode 100644 es-core/src/components/ImageAspectCheck.h
+ create mode 100644 es-core/src/components/ScreenShape.h
+
+diff --git a/THEMES.md b/THEMES.md
+index 6f106872..298e8022 100644
+--- a/THEMES.md
++++ b/THEMES.md
+@@ -1008,6 +1008,9 @@ Can be created as an extra.
+     - BATOCERA 5.24: Selects if the background is over the full tile or only the image. `full` by default, can also be set to `image`. 
+ * `imageSizeMode` - type: STRING.
+     - BATOCERA 5.24: Selects the image sizing mode. `maxSize` by default, can also be set to `minSize` (outer zoom) or `size` (stretch). 
++      `screen` stretches like `size` (a capture at its screen's shape: a TV game's at 4:3), but a picture turned the
++      other way than the tile (an upright game's capture in a landscape tile) keeps its orientation: it takes the
++      tile's shape turned, as tall (or as wide) as the tile, centred. The selected tile's video too.
+ * `reflexion` - type: NORMALIZED_PAIR.
+ 	- BATOCERA 5.24: table reflexion effect. First item is top position alpha, second is bottom alpha.
+     
+diff --git a/es-core/src/components/GridTileComponent.cpp b/es-core/src/components/GridTileComponent.cpp
+index 66e7c51d..a4a9b975 100644
+--- a/es-core/src/components/GridTileComponent.cpp
++++ b/es-core/src/components/GridTileComponent.cpp
+@@ -255,7 +255,12 @@ void GridTileComponent::resize()
+ 			mVideo->setOrigin(0.5f, 0.5f);
+ 			mVideo->setPosition(size.x() / 2.0f, (size.y() - height) / 2.0f);
+ 
+-			if (currentProperties.Image.sizeMode == "size")
++			mVideo->setKeepOrientation(currentProperties.Image.keepOrientation);
++
++			// A screen's shape that keeps the video's orientation is worked out from the video's size (resize)
++			if (currentProperties.Image.sizeMode == "size" && currentProperties.Image.keepOrientation)
++				mVideo->setResize(imageSize.x(), size.y() - topPadding - bottomPadding);
++			else if (currentProperties.Image.sizeMode == "size")
+ 				mVideo->setSize(imageSize.x(), size.y() - topPadding - bottomPadding);
+ 			else
+ 				mVideo->setMaxSize(imageSize.x(), size.y() - topPadding - bottomPadding);
+@@ -583,7 +588,12 @@ void GridTileComponent::applyThemeToProperties(const ThemeData::ThemeElement* el
+ 		properties.Image.color = properties.Image.colorEnd = elem->get<unsigned int>("imageColor");
+ 
+ 	if (elem && elem->has("imageSizeMode"))
++	{
+ 		properties.Image.sizeMode = elem->get<std::string>("imageSizeMode");
++		properties.Image.keepOrientation = properties.Image.sizeMode == "screen";
++		if (properties.Image.keepOrientation)
++			properties.Image.sizeMode = "size";
++	}
+ }
+ 
+ bool GridImageProperties::applyTheme(const ThemeData::ThemeElement* elem)
+@@ -1208,6 +1218,8 @@ void GridTileComponent::startVideo()
+ 	if (mVideo != nullptr)
+ 	{
+ 		// Inform video component about size before staring in order to be able to use OptimizeVideo parameter
++		mVideo->setKeepOrientation(mSelectedProperties.Image.keepOrientation);
++
+ 		if (mSelectedProperties.Image.sizeMode == "minSize")
+ 			mVideo->setMinSize(mSelectedProperties.Size);
+ 		else
+@@ -1409,6 +1421,7 @@ void GridImageProperties::mixProperties(GridImageProperties& def, GridImagePrope
+ 	colorEnd = mixColors(def.colorEnd, sel.colorEnd, percent);
+ 	reflexion = mixVectors(def.reflexion, sel.reflexion, percent);
+ 	roundCorners = mixFloat(def.roundCorners, sel.roundCorners, percent);
++	keepOrientation = def.keepOrientation || sel.keepOrientation;
+ 
+ 	customShader = percent >= 0.02f ? sel.customShader : def.customShader;
+ }
+diff --git a/es-core/src/components/GridTileComponent.h b/es-core/src/components/GridTileComponent.h
+index cc2dad28..94805fee 100644
+--- a/es-core/src/components/GridTileComponent.h
++++ b/es-core/src/components/GridTileComponent.h
+@@ -25,6 +25,7 @@ public:
+ 		origin = Vector2f(0.5f, 0.5f);
+ 		color = colorEnd = 0xFFFFFFFF;		
+ 		sizeMode = "maxSize";
++		keepOrientation = false;
+ 		roundCorners = 0;
+ 	}
+ 
+@@ -38,6 +39,8 @@ public:
+ 
+ 		image->setPosition(offsetPos.x() + pos.x() * parentSize.x(), offsetPos.y() + pos.y() * parentSize.y());
+ 		
++		image->setKeepOrientation(keepOrientation);
++
+ 		if (!disableSize && sizeMode == "size")
+ 			image->setSize(size.x() * parentSize.x(), size.y() * parentSize.y());
+ 		else if (sizeMode == "minSize")
+@@ -65,6 +68,9 @@ public:
+ 	unsigned int colorEnd;
+ 
+ 	std::string  sizeMode;
++	// imageSizeMode "screen": "size" (the picture takes the tile's shape, a screen's), but a picture turned the
++	// other way keeps its orientation (ScreenShape::fit)
++	bool         keepOrientation;
+ 
+ 	Renderer::ShaderInfo customShader;
+ 
+diff --git a/es-core/src/components/ImageAspectCheck.h b/es-core/src/components/ImageAspectCheck.h
+new file mode 100644
+index 00000000..1532cda6
+--- /dev/null
++++ b/es-core/src/components/ImageAspectCheck.h
+@@ -0,0 +1,58 @@
++#pragma once
++#ifndef ES_CORE_COMPONENTS_IMAGE_ASPECT_CHECK_H
++#define ES_CORE_COMPONENTS_IMAGE_ASPECT_CHECK_H
++
++#include "GuiComponent.h"
++#include "Log.h"
++#include "math/Transform4x4f.h"
++#include "math/Vector2i.h"
++#include "renderers/Renderer.h"
++
++#include <cmath>
++#include <cstdlib>
++#include <set>
++#include <string>
++
++// A check for render tests, on only with the environment variable ES_IMAGE_ASPECT: an image (or a video frame)
++// drawn at another aspect ratio than the part of its texture it shows is logged once per element, source and
++// drawn size, as "ImageAspect: ...". A theme stretches a picture only where it means to (a TV game's capture
++// shown at its screen's 4:3, say); the test fails on any other.
++namespace ImageAspectCheck
++{
++	inline bool enabled()
++	{
++		static const bool on = getenv("ES_IMAGE_ASPECT") != nullptr;
++		return on;
++	}
++
++	// v: the quad's four vertices (0 top left, 1 bottom left, 2 top right, 3 bottom right, as ES lays them out)
++	inline void check(const GuiComponent* comp, const std::string& source, const Renderer::Vertex* v, const Vector2i& texture,
++		const Transform4x4f& trans)
++	{
++		if (!enabled() || comp == nullptr || v == nullptr || texture.x() <= 0 || texture.y() <= 0)
++			return;
++
++		float dw = std::fabs(v[2].pos.x() - v[0].pos.x()) * std::fabs(trans.r0().x());
++		float dh = std::fabs(v[1].pos.y() - v[0].pos.y()) * std::fabs(trans.r1().y());
++		float tw = std::fabs(v[2].tex.x() - v[0].tex.x()) * texture.x();
++		float th = std::fabs(v[1].tex.y() - v[0].tex.y()) * texture.y();
++		if (dw < 1.0f || dh < 1.0f || tw <= 0.0f || th <= 0.0f)
++			return;
++
++		// The width the drawn height asks for at the texture's ratio, within a pixel and a half or 3 %
++		float expected = dh * tw / th;
++		if (std::fabs(dw - expected) <= std::max(1.5f, 0.03f * dw))
++			return;
++
++		static std::set<std::string> logged;
++		auto parent = comp->getParent();
++		std::string key = comp->getTag() + "|" + source + "|" + std::to_string((int)std::round(dw)) + "x" + std::to_string((int)std::round(dh));
++		if (!logged.insert(key).second)
++			return;
++
++		LOG(LogError) << "ImageAspect: " << (comp->getTag().empty() ? "?" : comp->getTag()) << " in " << (parent == nullptr || parent->getTag().empty() ? "?" : parent->getTag())
++			<< " | " << source << " | texture " << (int)std::round(tw) << "x" << (int)std::round(th) << " drawn " << (int)std::round(dw) << "x" << (int)std::round(dh);
++	}
++}
++
++#endif // ES_CORE_COMPONENTS_IMAGE_ASPECT_CHECK_H
+diff --git a/es-core/src/components/ImageComponent.cpp b/es-core/src/components/ImageComponent.cpp
+index ede02008..e925098c 100644
+--- a/es-core/src/components/ImageComponent.cpp
++++ b/es-core/src/components/ImageComponent.cpp
+@@ -1,4 +1,6 @@
+ #include "components/ImageComponent.h"
++#include "components/ImageAspectCheck.h"
++#include "components/ScreenShape.h"
+ 
+ #include "resources/TextureResource.h"
+ #include "Log.h"
+@@ -34,7 +36,7 @@ Vector2f ImageComponent::getSize() const
+ }
+ 
+ ImageComponent::ImageComponent(Window* window, bool forceLoad, bool dynamic) : GuiComponent(window),
+-	mTargetIsMax(false), mTargetIsMin(false), mFlipX(false), mFlipY(false), mTargetSize(0, 0), mColorShift(0xFFFFFFFF),
++	mTargetIsMax(false), mTargetIsMin(false), mKeepOrientation(false), mFlipX(false), mFlipY(false), mTargetSize(0, 0), mColorShift(0xFFFFFFFF),
+ 	mColorShiftEnd(0xFFFFFFFF), mColorGradientHorizontal(true), mForceLoad(forceLoad), mDynamic(dynamic),
+ 	mFadeOpacity(0), mFading(false), mRotateByTargetSize(false), mTopLeftCrop(0.0f, 0.0f), mBottomRightCrop(1.0f, 1.0f),
+ 	mReflection(0.0f, 0.0f), mSharedTexture(true)
+@@ -80,6 +82,15 @@ void ImageComponent::setSize(float w, float h)
+ 		recalcChildrenLayout();
+ }
+ 
++void ImageComponent::setKeepOrientation(bool keep)
++{
++	if (mKeepOrientation == keep)
++		return;
++
++	mKeepOrientation = keep;
++	resize();
++}
++
+ void ImageComponent::resize()
+ {
+ 	if (!mTexture)
+@@ -164,6 +175,9 @@ void ImageComponent::resize()
+ 			// if no components are set, we don't resize at all
+ 			mSize = targetSize == Vector2f::Zero() ? textureSize : targetSize;
+ 
++			if (mKeepOrientation && targetSize.x() > 0 && targetSize.y() > 0)
++				mSize = ScreenShape::fit(targetSize, textureSize);
++
+ 			// if only one component is set, we resize in a way that maintains aspect ratio
+ 			// for SVG rasterization, we always calculate width from rounded height (see comment above)
+ 			if (!targetSize.x() && targetSize.y())
+@@ -693,6 +707,8 @@ void ImageComponent::render(const Transform4x4f& parentTrans)
+ 		mVertices->saturation = mSaturation;
+ 		mVertices->customShader = mCustomShader.path.empty() ? nullptr : &mCustomShader;						
+ 
++		ImageAspectCheck::check(this, mPath, mVertices, mTexture->getSize(), trans);
++
+ 		if (mRoundCorners > 0 && mRoundCornerStencil.size() > 0)
+ 		{
+ 			Renderer::setStencil(mRoundCornerStencil.data(), mRoundCornerStencil.size());
+diff --git a/es-core/src/components/ImageComponent.h b/es-core/src/components/ImageComponent.h
+index b5f15a07..f4c39827 100644
+--- a/es-core/src/components/ImageComponent.h
++++ b/es-core/src/components/ImageComponent.h
+@@ -47,6 +47,9 @@ public:
+ 	// Can be set before or after an image is loaded.
+ 	// setMaxSize() and setResize() are mutually exclusive.
+ 	void setResize(float width, float height);
++	// With setResize (both sides): a picture turned the other way than the size keeps its orientation
++	// (ScreenShape::fit)
++	void setKeepOrientation(bool keep);
+ 	inline void setResize(const Vector2f& size) { setResize(size.x(), size.y()); }
+ 
+ 	// Resize the image to be as large as possible but fit within a box of this size.
+@@ -140,6 +143,7 @@ protected:
+ 
+ private:
+ 	bool mFlipX, mFlipY, mTargetIsMax, mTargetIsMin;
++	bool mKeepOrientation;
+ 
+ 	// Calculates the correct mSize from our resizing information (set by setResize/setMaxSize).
+ 	// Used internally whenever the resizing parameters or texture change.
+diff --git a/es-core/src/components/ScreenShape.h b/es-core/src/components/ScreenShape.h
+new file mode 100644
+index 00000000..77e23bee
+--- /dev/null
++++ b/es-core/src/components/ScreenShape.h
+@@ -0,0 +1,32 @@
++#pragma once
++#ifndef ES_CORE_COMPONENTS_SCREEN_SHAPE_H
++#define ES_CORE_COMPONENTS_SCREEN_SHAPE_H
++
++#include "math/Vector2f.h"
++
++// A picture stretched to a screen's shape (a TV game's capture at 4:3) keeps its orientation: one taller than
++// wide in a landscape box (an upright arcade game) gets the box's shape turned upright, inside it and as tall,
++// and the other way round. Pictures close to square, or turned the same way as the box, take the box.
++namespace ScreenShape
++{
++	inline Vector2f fit(const Vector2f& box, const Vector2f& picture)
++	{
++		if (box.x() <= 0 || box.y() <= 0 || picture.x() <= 0 || picture.y() <= 0)
++			return box;
++
++		bool boxWide = box.x() > box.y() * 1.05f;
++		bool boxTall = box.y() > box.x() * 1.05f;
++		bool picWide = picture.x() > picture.y() * 1.05f;
++		bool picTall = picture.y() > picture.x() * 1.05f;
++
++		if (boxWide && picTall)
++			return Vector2f(box.y() * box.y() / box.x(), box.y());
++
++		if (boxTall && picWide)
++			return Vector2f(box.x(), box.x() * box.x() / box.y());
++
++		return box;
++	}
++}
++
++#endif // ES_CORE_COMPONENTS_SCREEN_SHAPE_H
+diff --git a/es-core/src/components/SlideshowComponent.cpp b/es-core/src/components/SlideshowComponent.cpp
+index 28b9c921..7831725a 100644
+--- a/es-core/src/components/SlideshowComponent.cpp
++++ b/es-core/src/components/SlideshowComponent.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "components/GridTileComponent.h"
+ #include "components/SlideLayout.h"
++#include "components/ImageAspectCheck.h"
+ #include "renderers/Renderer.h"
+ #include "resources/TextureResource.h"
+ #include "utils/StringUtil.h"
+@@ -129,6 +130,7 @@ void SlideshowComponent::drawSlide(const std::shared_ptr<TextureResource>& textu
+ 	vertices[3] = { { r, b }, { 1.0f, 0.0f }, color };
+ 	vertices[0].saturation = mSaturation;
+ 
++	ImageAspectCheck::check(this, "slide", vertices, Vector2i((int)size.x(), (int)size.y()), trans);
+ 	Renderer::setMatrix(trans);
+ 	Renderer::drawTriangleStrips(&vertices[0], 4);
+ }
+diff --git a/es-core/src/components/VideoComponent.cpp b/es-core/src/components/VideoComponent.cpp
+index 86491800..a31203f4 100644
+--- a/es-core/src/components/VideoComponent.cpp
++++ b/es-core/src/components/VideoComponent.cpp
+@@ -72,6 +72,7 @@ VideoComponent::VideoComponent(Window* window) :
+ 	mIdleStopped(false),
+ 	mTargetIsMax(false),
+ 	mTargetIsMin(false),
++	mKeepOrientation(false),
+ 	mTargetSize(0, 0),
+ 	mPlayAudio(true)
+ {
+diff --git a/es-core/src/components/VideoComponent.h b/es-core/src/components/VideoComponent.h
+index 91ccb2f2..d42b2cc0 100644
+--- a/es-core/src/components/VideoComponent.h
++++ b/es-core/src/components/VideoComponent.h
+@@ -89,6 +89,9 @@ public:
+ 	// setMaxSize() and setResize() are mutually exclusive.
+ 	virtual void setResize(float width, float height) = 0;
+ 	inline void setResize(const Vector2f& size) { setResize(size.x(), size.y()); }
++	// With setResize (both sides): a video turned the other way than the size keeps its orientation
++	// (ScreenShape::fit)
++	void setKeepOrientation(bool keep) { mKeepOrientation = keep; }
+ 
+ 	// Resize the video to be as large as possible but fit within a box of this size.
+ 	// Can be set before or after a video is loaded.
+@@ -222,6 +225,7 @@ protected:
+ 	bool							mThemeSnapshot;	// the theme gives the snapshot ("snapshot"): it takes the video's colour and saturation
+ 	bool							mTargetIsMax;
+ 	bool							mTargetIsMin;
++	bool							mKeepOrientation;
+ 
+ 	bool							mIsWaitingForVideoToStart;
+ 
+diff --git a/es-core/src/components/VideoVlcComponent.cpp b/es-core/src/components/VideoVlcComponent.cpp
+index fb97cc50..85750c3e 100644
+--- a/es-core/src/components/VideoVlcComponent.cpp
++++ b/es-core/src/components/VideoVlcComponent.cpp
+@@ -1,4 +1,6 @@
+ #include "components/VideoVlcComponent.h"
++#include "components/ImageAspectCheck.h"
++#include "components/ScreenShape.h"
+ 
+ #include "renderers/Renderer.h"
+ #include "resources/TextureResource.h"
+@@ -457,6 +459,9 @@ void VideoVlcComponent::resize()
+ 		// if no components are set, we don't resize at all
+ 		mSize = targetSize == Vector2f::Zero() ? textureSize : targetSize;
+ 
++		if (mKeepOrientation && targetSize.x() > 0 && targetSize.y() > 0)
++			mSize = ScreenShape::fit(targetSize, textureSize);
++
+ 		// if only one component is set, we resize in a way that maintains aspect ratio
+ 		// for SVG rasterization, we always calculate width from rounded height (see comment above)
+ 		if (!targetSize.x() && targetSize.y())
+@@ -757,6 +762,7 @@ void VideoVlcComponent::render(const Transform4x4f& parentTrans)
+ 	
+ 	if (mTexture->bind())
+ 	{
++		ImageAspectCheck::check(this, mVideoPath, mVertices, mTexture->getSize(), trans);
+ 		Renderer::setMatrix(trans);
+ 
+ 		beginCustomClipRect();
