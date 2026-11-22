@@ -1,5 +1,13 @@
 # knulli-console-bundles
 
+## Instalar Canica en la RG35XX H
+
+Este repositorio proporciona el compilador para Scarab y las herramientas de instalación y recuperación. El [fork de KNULLI](https://github.com/eduarbo/knulli-linux) integra el motor y el adaptador de partidas. El [fork de EmulationStation](https://github.com/eduarbo/batocera-emulationstation) implementa los controles, las vistas previas y la búsqueda usados por el tema. Para **Iris o Ámbar**, empieza por la guía de la candidata. Incluye la ruta sin compilar, la alternativa desde fuentes y cómo volver al menú original. [Instalar Canica en una Anbernic RG35XX H](https://github.com/eduarbo/knulli-linux/blob/scarab-20260511-fixes/docs/canica-rg35xx-h.md).
+
+El último bundle firmado para Scarab `20260511` incorporó la serie de 110 parches del menú. Canica RC27.1 usa una serie de 125 y obtiene el tema por separado. [Contenido del bundle de Scarab](https://github.com/eduarbo/knulli-console-bundles/releases/tag/bundle-scarab-2026-05-11-00-09)
+
+## Firmware fix bundles
+
 Signed bundles of firmware-tied fixes for one Anbernic RG35XX-H running Knulli. When
 [knulli-cfw/knulli-linux](https://github.com/knulli-cfw/knulli-linux) publishes a release,
 `.github/workflows/console-bundle.yml`:
