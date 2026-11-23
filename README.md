@@ -1,10 +1,12 @@
-# knulli-console-bundles
+# KNULLI console bundles
 
-## Instalar Canica en la RG35XX H
+## Canica on the RG35XX H
 
-Este repositorio proporciona el compilador para Scarab y las herramientas de instalación y recuperación. El [fork de KNULLI](https://github.com/eduarbo/knulli-linux) integra el motor y el adaptador de partidas. El [fork de EmulationStation](https://github.com/eduarbo/batocera-emulationstation) implementa los controles, las vistas previas y la búsqueda usados por el tema. Para **Iris o Ámbar**, empieza por la guía de la candidata. Incluye la ruta sin compilar, la alternativa desde fuentes y cómo volver al menú original. [Instalar Canica en una Anbernic RG35XX H](https://github.com/eduarbo/knulli-linux/blob/main/docs/canica-rg35xx-h.md).
+This repository provides the ARM64 build tools and the recovery service. Canica uses the [KNULLI fork](https://github.com/eduarbo/knulli-linux) for firmware integration and save selection, and the [EmulationStation fork](https://github.com/eduarbo/batocera-emulationstation) for navigation, search and video previews. Start with the handheld kit to install Iris or Amber.
 
-El último bundle firmado para Scarab `20260511` incorporó la serie de 110 parches del menú. Canica RC27.1 usa una serie de 125 y obtiene el tema por separado. [Contenido del bundle de Scarab](https://github.com/eduarbo/knulli-console-bundles/releases/tag/bundle-scarab-2026-05-11-00-09)
+[See Canica on the handheld](https://github.com/eduarbo/knulli-linux) · [Install RC30 and restore the stock menu](https://github.com/eduarbo/knulli-linux/blob/main/docs/canica-rg35xx-h.md) · [Build using the pinned tools](https://github.com/eduarbo/knulli-linux/tree/main/tools/canica)
+
+The signed bundle for Scarab `20260511` included the earlier 110-patch frontend. The RC27.1 frontend series grew to 125 patches. RC30 uses the frontend revision pinned in the installation guide. The theme is supplied separately. [Signed Scarab bundle](https://github.com/eduarbo/knulli-console-bundles/releases/tag/bundle-scarab-2026-05-11-00-09)
 
 ## Firmware fix bundles
 
