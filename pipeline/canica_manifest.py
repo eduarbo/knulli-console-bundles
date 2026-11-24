@@ -29,6 +29,7 @@ SHA256 = re.compile(r'^[0-9a-f]{64}$')
 LABEL = re.compile(r'^[A-Za-z0-9][A-Za-z0-9 .]{0,23}$')
 VERSION = re.compile(r'^[0-9a-z][0-9a-z.+-]{0,39}$')
 SOURCE = 'https://github.com/eduarbo/canica/releases/download/'
+NOTE = re.compile(r'^[^\x00-\x1f\x7f]{1,66}$')      # one line on the handheld's screen
 MEMBERS = ('__main__.py', 'resume-emulatorlauncher')
 
 
@@ -62,6 +63,8 @@ def main():
         sys.exit('bad VERSION, LABEL or SERIAL in the pin')
     if not pin['URL'].startswith(SOURCE):
         sys.exit('the pinned URL is not a release asset of the kit repository')
+    if pin.get('NOTE') and not NOTE.match(pin['NOTE']):
+        sys.exit('NOTE must be one line of at most 66 characters')
     for key in ('SHA256', 'KIT_SHA256', 'INVENTORY_SHA256'):
         if not SHA256.match(pin[key]):
             sys.exit('bad %s in the pin' % key)
@@ -108,6 +111,8 @@ def main():
                                                       os.environ['GITHUB_RUN_ID'])
                            if os.environ.get('GITHUB_RUN_ID') else '')),
     )
+    if pin.get('NOTE'):
+        manifest['note'] = pin['NOTE']
     with open(os.path.join(a.dist, 'manifest.json'), 'w') as f:
         json.dump(manifest, f, indent=1, sort_keys=True)
         f.write('\n')
