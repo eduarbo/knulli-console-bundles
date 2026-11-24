@@ -1,0 +1,85 @@
+# The Canica kit channel for the RG35XX-H: when canica/kit.env changes on main, check the
+# pinned installer, prove that the published kit upgrades to it, then sign its manifest and
+# publish release canica-<firmware slug>. The console's canica_updater installs it.
+# Lives on main of eduarbo/knulli-console-bundles beside the fix bundles, with the same key.
+name: Canica kit
+
+on:
+  push:
+    branches: [main]
+    paths: ['canica/kit.env']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canica-kit
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # Runs the installers' own code (the upgrade test) and holds no secret.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the pinned installer
+        run: |
+          . canica/kit.env
+          curl -fsSL --retry 3 -o installer.sh "$URL"
+      - name: It is the pinned file and holds the pinned kit
+        run: python3 -I pipeline/canica_manifest.py --pin canica/kit.env --payload installer.sh --dist dist --extract extract
+      - name: It installs on an empty card and over the published kit
+        run: |
+          . canica/kit.env
+          slug=$(python3 -I -c 'import re, sys; print(re.sub(r"[^a-z0-9]+", "-", sys.argv[1].lower()).strip("-"))' "$FIRMWARE")
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/canica-$slug"
+          earlier=()
+          if curl -fsSL -o published.json "$base/manifest.json"; then
+            name=$(python3 -I -c 'import json, re, sys; n = json.load(open(sys.argv[1]))["payload"]["name"]; assert re.fullmatch(r"canica-[0-9]+\.sh", n); print(n)' published.json)
+            curl -fsSL --retry 3 -o "$name" "$base/$name"
+            earlier=("$name")
+          fi
+          python3 -I pipeline/canica_upgrade_test.py installer.sh "${earlier[@]}"
+
+  publish:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Holds BUNDLE_SIGNING_KEY_B64; the environment is restricted to main. No kit code runs
+    # here: the installer is downloaded again and handled as data, checked against the pin of
+    # this checkout before its manifest is signed.
+    environment: bundle-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the pinned installer
+        run: |
+          . canica/kit.env
+          curl -fsSL --retry 3 -o installer.sh "$URL"
+      - name: Check it against the pin and write the manifest
+        run: python3 -I pipeline/canica_manifest.py --pin canica/kit.env --payload installer.sh --dist dist --extract extract
+      - name: Privacy scan of the installer and the kit inside it
+        env:
+          PRIVACY_DENYLIST_B64: ${{ secrets.PRIVACY_DENYLIST_B64 }}
+        run: python3 -I pipeline/privacy_scan.py extract dist/manifest.json
+      - name: Sign the manifest
+        env:
+          BUNDLE_SIGNING_KEY_B64: ${{ secrets.BUNDLE_SIGNING_KEY_B64 }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/bundle-signing.pem"
+          printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 -d > "$key"
+          bash pipeline/sign.sh dist/manifest.json "$key" keys; rc=$?
+          rm -f "$key"
+          exit $rc
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash pipeline/canica_publish.sh dist keys

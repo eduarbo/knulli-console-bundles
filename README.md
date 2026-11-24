@@ -2,11 +2,11 @@
 
 ## Canica on the RG35XX H
 
-This repository provides the ARM64 build tools and the recovery service. Canica uses the [KNULLI fork](https://github.com/eduarbo/knulli-linux) for firmware integration and save selection, and the [EmulationStation fork](https://github.com/eduarbo/batocera-emulationstation) for navigation, search and video previews. Start with the handheld kit to install Iris or Amber.
+This repository provides the ARM64 build tools and the recovery service. [Canica](https://github.com/eduarbo/canica) uses the [KNULLI fork](https://github.com/eduarbo/knulli-linux) for firmware integration, and the [EmulationStation fork](https://github.com/eduarbo/batocera-emulationstation) for navigation, search and video previews. Start with the handheld kit to install Iris or Amber.
 
-[See Canica on the handheld](https://github.com/eduarbo/knulli-linux) · [Install RC30 and restore the stock menu](https://github.com/eduarbo/knulli-linux/blob/main/docs/canica-rg35xx-h.md) · [Build using the pinned tools](https://github.com/eduarbo/knulli-linux/tree/main/tools/canica)
+[See Canica on the handheld](https://github.com/eduarbo/canica) · [Install it and restore the stock menu](https://github.com/eduarbo/canica/blob/main/docs/canica-rg35xx-h.md) · [Build using the pinned tools](https://github.com/eduarbo/canica/tree/main/tools/canica)
 
-The signed bundle for Scarab `20260511` included the earlier 110-patch frontend. The RC27.1 frontend series grew to 125 patches. RC30 uses the frontend revision pinned in the installation guide. The theme is supplied separately. [Signed Scarab bundle](https://github.com/eduarbo/knulli-console-bundles/releases/tag/bundle-scarab-2026-05-11-00-09)
+The signed bundle for Scarab `20260511` included the earlier 110-patch frontend. The RC27.1 frontend series grew to 125 patches. RC30 and later use the frontend revision pinned in the installation guide. The kit is a release of the Canica repository. [Signed Scarab bundle](https://github.com/eduarbo/knulli-console-bundles/releases/tag/bundle-scarab-2026-05-11-00-09)
 
 ## Firmware fix bundles
 
@@ -32,6 +32,17 @@ Signed bundles of firmware-tied fixes for one Anbernic RG35XX-H running Knulli. 
 
 The console's `fix_updater` service caches the next firmware's bundle before an update, then
 installs each unit with its own `install.sh`, checks it, and rolls it back on failure.
+
+## Canica kit updates
+
+The same key signs a second channel: release `canica-<firmware slug>` holds the Canica kit the
+console installs next. `canica/kit.env` on `main` pins that installer, a release asset of
+[eduarbo/canica](https://github.com/eduarbo/canica), by size and SHA-256. When the pin changes,
+`.github/workflows/canica-kit.yml` checks the download against it, proves that the published
+kit upgrades to the new one, signs a manifest of kind `canica-kit` and publishes it. On the
+console, `canica_updater` verifies the manifest with the key it already trusts for the fixes,
+runs the kit's own installer while the menu is free, restarts the menu and says each step on
+screen. `fix_updater` refuses that kind of manifest, and `canica_updater` refuses every other.
 
 ## License
 
