@@ -32,3 +32,7 @@ Signed bundles of firmware-tied fixes for one Anbernic RG35XX-H running Knulli. 
 
 The console's `fix_updater` service caches the next firmware's bundle before an update, then
 installs each unit with its own `install.sh`, checks it, and rolls it back on failure.
+
+## License
+
+My code in this repository is released under the [MIT License](LICENSE). Files derived from KNULLI or ConnMan sources keep those projects' licenses: the stock scripts used as test fixtures, the patched versions the units install, and the ConnMan patch.
