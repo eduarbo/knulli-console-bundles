@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import sys
+import textwrap
 import time
 import zipfile
 
@@ -30,6 +31,9 @@ LABEL = re.compile(r'^[A-Za-z0-9][A-Za-z0-9 .]{0,23}$')
 VERSION = re.compile(r'^[0-9a-z][0-9a-z.+-]{0,39}$')
 SOURCE = 'https://github.com/eduarbo/canica/releases/download/'
 NOTE = re.compile(r'^[^\x00-\x1f\x7f]{1,66}$')      # one line on the handheld's screen
+# The update screen fits 46 letters a line. Kits up to RC37 break the note every 56 characters
+# before drawing it, so each of those pieces must fit too.
+SCREEN, OLD_WRAP = 46, 56
 MEMBERS = ('__main__.py', 'resume-emulatorlauncher')
 
 
@@ -65,6 +69,9 @@ def main():
         sys.exit('the pinned URL is not a release asset of the kit repository')
     if pin.get('NOTE') and not NOTE.match(pin['NOTE']):
         sys.exit('NOTE must be one line of at most 66 characters')
+    if pin.get('NOTE') and any(len(line) > SCREEN for line in textwrap.wrap(pin['NOTE'], OLD_WRAP)):
+        sys.exit('NOTE must fit the update screen: broken every %d characters, each piece at most %d'
+                 % (OLD_WRAP, SCREEN))
     for key in ('SHA256', 'KIT_SHA256', 'INVENTORY_SHA256'):
         if not SHA256.match(pin[key]):
             sys.exit('bad %s in the pin' % key)
