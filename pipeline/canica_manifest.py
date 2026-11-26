@@ -7,7 +7,8 @@ The pin on main says which installer the console installs next: its URL, size an
 the kit ZIP inside it and that kit's inventory digest. FILE is that download. It is checked
 against every pinned value, opened as data, and unpacked into EXTRACT (installer/ and kit/)
 so the privacy scan reads what the archive holds. DIST gets what is signed and published:
-  manifest.json       kind canica-kit: model, firmware, serial, the payload's sha256 and size
+  manifest.json       kind canica-kit: model, firmware, serial, the payload's sha256 and size,
+                      and the optional release note: note (Spanish) and note_en (English)
   canica-<serial>.sh  the installer, byte for byte
 """
 import argparse
@@ -72,6 +73,9 @@ def main():
     if pin.get('NOTE') and any(len(line) > SCREEN for line in textwrap.wrap(pin['NOTE'], OLD_WRAP)):
         sys.exit('NOTE must fit the update screen: broken every %d characters, each piece at most %d'
                  % (OLD_WRAP, SCREEN))
+    # A console in English shows NOTE_EN, none without it; only kits from RC42 read it
+    if pin.get('NOTE_EN') and not NOTE.match(pin['NOTE_EN']):
+        sys.exit('NOTE_EN must be one line of at most 66 characters')
     for key in ('SHA256', 'KIT_SHA256', 'INVENTORY_SHA256'):
         if not SHA256.match(pin[key]):
             sys.exit('bad %s in the pin' % key)
@@ -120,6 +124,8 @@ def main():
     )
     if pin.get('NOTE'):
         manifest['note'] = pin['NOTE']
+    if pin.get('NOTE_EN'):
+        manifest['note_en'] = pin['NOTE_EN']
     with open(os.path.join(a.dist, 'manifest.json'), 'w') as f:
         json.dump(manifest, f, indent=1, sort_keys=True)
         f.write('\n')
